@@ -75,6 +75,9 @@ $allowedExtensions = @(
 $sourceSubfolders = @("Desktop", "Downloads", "Documents", "OneDrive", "Pictures")
 $usersRoot = "C:\Users"
 $excludedUsers = @("Default", "Default User", "All Users", "DefaultAppPool", "WDAGUtilityAccount")
+$rootScanPath = "C:\"
+$rootCopyFolderName = "_RootDrive"
+$excludedRootPrefixes = @("C:\Windows", "C:\Program Files", "C:\Program Files (x86)")
 
 if (-not (Test-Path $destinationRoot)) {
     New-Item -Path $destinationRoot -ItemType Directory -Force | Out-Null
@@ -148,6 +151,61 @@ foreach ($profile in $userProfiles) {
             }
     }
 }
+
+Write-Log "Root drive scan started."
+if (Test-Path $rootScanPath) {
+    $rootFolders = Get-ChildItem -Path $rootScanPath -Directory -ErrorAction SilentlyContinue |
+        Where-Object {
+            $fullName = $_.FullName
+            (-not $fullName.StartsWith($stagingRoot, [System.StringComparison]::OrdinalIgnoreCase)) -and
+            (-not $fullName.StartsWith($usersRoot, [System.StringComparison]::OrdinalIgnoreCase)) -and
+            (-not ($excludedRootPrefixes | Where-Object {
+                $fullName.StartsWith($_, [System.StringComparison]::OrdinalIgnoreCase)
+            }))
+        }
+
+    foreach ($folder in $rootFolders) {
+        if ($totalBytes -ge $maxTotalBytes) {
+            Write-Log ("Size limit reached; skipping remaining root folders. Limit: " + $maxTotalBytes)
+            break
+        }
+
+        Get-ChildItem -Path $folder.FullName -Recurse -File -ErrorAction SilentlyContinue |
+            Where-Object { $allowedExtensions -contains $_.Extension.ToLowerInvariant() } |
+            ForEach-Object {
+                if ($totalBytes -ge $maxTotalBytes) {
+                    Write-Log ("Size limit reached; skipping remaining root files. Limit: " + $maxTotalBytes)
+                    break
+                }
+
+                $matchedCount++
+                $relativePath = $_.FullName.Substring($rootScanPath.Length).TrimStart("\")
+                $destFolder = Join-Path $destinationRoot $rootCopyFolderName
+                $destFile = Join-Path $destFolder $relativePath
+
+                $destDir = Split-Path $destFile -Parent
+                if (-not (Test-Path $destDir)) {
+                    New-Item -Path $destDir -ItemType Directory -Force | Out-Null
+                }
+
+                $sourceFile = $_.FullName
+                try {
+                    $fileSize = $_.Length
+                    if (($totalBytes + $fileSize) -gt $maxTotalBytes) {
+                        Write-Log ("Skipping file due to size cap: " + $sourceFile)
+                        return
+                    }
+                    Copy-Item -Path $sourceFile -Destination $destFile -Force -ErrorAction Stop
+                    $copiedCount++
+                    $totalBytes += $fileSize
+                } catch {
+                    $errorCount++
+                    Write-Log ("Copy failed: " + $sourceFile + " -> " + $destFile + " | " + $_.Exception.Message)
+                }
+            }
+    }
+}
+Write-Log "Root drive scan finished."
 
 Write-Log ("Matched files: " + $matchedCount)
 Write-Log ("Copied files: " + $copiedCount)
