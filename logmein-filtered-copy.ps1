@@ -5,7 +5,7 @@ $stagingRoot = "C:\Staging_Logmein_central"
 $archiveFolderName = "01_PCARCHIVE"
 $maxTotalBytes = 60GB
 
-$propertyFolderFile = "C:\PropertyFolder.json"
+$propertyPcDetailsFolder = "C:\PropertyPcDetails.json"
 
 if (-not $stagingRoot) {
     Write-Host "Staging root path is empty."
@@ -21,29 +21,29 @@ if (-not $computerName) {
     Write-Host "Computer name not found."
     exit 1
 }
-if (-not (Test-Path $propertyFolderFile)) {
-    Write-Host "Property folder file not found: $propertyFolderFile"
+if (-not (Test-Path $propertyPcDetailsFolder)) {
+    Write-Host "Property folder file not found: $propertyPcDetailsFolder"
     exit 1
 }
 
 try {
-    $config = Get-Content -Path $propertyFolderFile -Raw | ConvertFrom-Json
+    $config = Get-Content -Path $propertyPcDetailsFolder -Raw | ConvertFrom-Json
 } catch {
-    Write-Host "Failed to read JSON config: $propertyFolderFile"
+    Write-Host "Failed to read JSON config: $propertyPcDetailsFolder"
     exit 1
 }
 
-$propertyFolder = $config.PropertyFolder
+$propertyPcDetailsName = $config.PropertyFolder
 $targetFolder = $config.TargetFolder
-if (-not $propertyFolder -or -not $targetFolder) {
-    Write-Host "PropertyFolder.json must contain PropertyFolder and TargetFolder."
+if (-not $propertyPcDetailsName -or -not $targetFolder) {
+    Write-Host "PropertyPcDetails.json must contain PropertyFolder and TargetFolder."
     exit 1
 }
 
-$propertyFolder = $propertyFolder.Trim()
+$propertyPcDetailsName = $propertyPcDetailsName.Trim()
 $targetFolder = $targetFolder.Trim()
-if (-not $propertyFolder -or -not $targetFolder) {
-    Write-Host "PropertyFolder or TargetFolder is empty in: $propertyFolderFile"
+if (-not $propertyPcDetailsName -or -not $targetFolder) {
+    Write-Host "PropertyPcDetails or TargetFolder is empty in: $propertyPcDetailsFolder"
     exit 1
 }
 
@@ -54,7 +54,7 @@ if (-not $targetFolder) {
     exit 1
 }
 
-$destinationRoot = Join-Path $stagingRoot (Join-Path $propertyFolder (Join-Path $archiveFolderName $targetFolder))
+$destinationRoot = Join-Path $stagingRoot (Join-Path $propertyPcDetailsName (Join-Path $archiveFolderName $targetFolder))
 if (-not $destinationRoot) {
     Write-Host "Destination root is empty."
     exit 1
@@ -94,7 +94,7 @@ function Write-Log {
 
 Write-Log "Copy job started."
 Write-Log ("ComputerName: " + $computerName)
-Write-Log ("PropertyFolder: " + $propertyFolder)
+Write-Log ("PropertyPcDetails: " + $propertyPcDetailsName)
 Write-Log ("DestinationRoot: " + $destinationRoot)
 
 $userProfiles = Get-ChildItem -Path $usersRoot -Directory -ErrorAction SilentlyContinue |
