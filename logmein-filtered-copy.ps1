@@ -5,7 +5,7 @@ $stagingRoot = "C:\Staging_Logmein_central"
 $archiveFolderName = "01_PCARCHIVE"
 $maxTotalBytes = 60GB
 
-$pcDetailsTransform = "C:\PropertyPcDetails.json"
+$pcDetailsMapping = "C:\PcDetails.json"
 
 if (-not $stagingRoot) {
     Write-Host "Staging root path is empty."
@@ -21,29 +21,29 @@ if (-not $computerName) {
     Write-Host "Computer name not found."
     exit 1
 }
-if (-not (Test-Path $pcDetailsTransform)) {
-    Write-Host "Property folder file not found: $pcDetailsTransform"
+if (-not (Test-Path $pcDetailsMapping)) {
+    Write-Host "Property folder file not found: $pcDetailsMapping"
     exit 1
 }
 
 try {
-    $config = Get-Content -Path $pcDetailsTransform -Raw | ConvertFrom-Json
+    $config = Get-Content -Path $pcDetailsMapping -Raw | ConvertFrom-Json
 } catch {
-    Write-Host "Failed to read JSON config: $pcDetailsTransform"
+    Write-Host "Failed to read JSON config: $pcDetailsMapping"
     exit 1
 }
 
 $propertyPcDetailsName = $config.PropertyFolder
 $targetFolder = $config.TargetFolder
 if (-not $propertyPcDetailsName -or -not $targetFolder) {
-    Write-Host "PropertyPcDetails.json must contain PropertyFolder and TargetFolder."
+    Write-Host "PcDetails.json must contain PropertyFolder and TargetFolder."
     exit 1
 }
 
 $propertyPcDetailsName = $propertyPcDetailsName.Trim()
 $targetFolder = $targetFolder.Trim()
 if (-not $propertyPcDetailsName -or -not $targetFolder) {
-    Write-Host "PropertyPcDetails or TargetFolder is empty in: $pcDetailsTransform"
+    Write-Host "PropertyPcDetails or TargetFolder is empty in: $pcDetailsMapping"
     exit 1
 }
 
