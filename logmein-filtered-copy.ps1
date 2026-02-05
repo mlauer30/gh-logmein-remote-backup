@@ -215,3 +215,4 @@ Write-Log "Copy job finished."
 
 Write-Host "Copy complete."
 exit 0
+>>>>>>> origin/main
