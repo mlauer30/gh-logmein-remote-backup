@@ -105,6 +105,163 @@ function Write-Log {
     Add-Content -Path $logFile -Value $line
 }
 
+# Configure AV CLI mappings here when needed.
+$avCliOverrides = @(
+    @{
+        Name = "Windows Defender"
+        MatchNames = @("Windows Defender", "Microsoft Defender", "Microsoft Defender ATP", "Microsoft Security Essentials")
+        ExePaths = @(
+            (Join-Path $env:ProgramFiles "Windows Defender\MpCmdRun.exe"),
+            (Join-Path $env:ProgramFiles "Microsoft Security Client\MpCmdRun.exe")
+        )
+        Args = { param($scanPath) @("-Scan", "-ScanType", "3", "-File", $scanPath) }
+    },
+    @{
+        Name = "Avast Free Antivirus"
+        MatchNames = @("Avast", "Avast! Free Antivirus")
+        ExePaths = @(
+            (Join-Path $env:ProgramFiles "Avast Software\Avast\AvastCmd.exe"),
+            (Join-Path $env:ProgramFiles "AVAST Software\Avast\AvastCmd.exe")
+        )
+        Args = { param($scanPath) @("scan", $scanPath) }
+    },
+    @{
+        Name = "AVG AntiVirus Free"
+        MatchNames = @("AVG AntiVirus Free", "AVG Antivirus")
+        ExePaths = @(
+            (Join-Path $env:ProgramFiles "AVG\Antivirus\avgscanx.exe"),
+            (Join-Path $env:ProgramFiles(x86) "AVG\Antivirus\avgscanx.exe")
+        )
+        Args = { param($scanPath) @("/SCAN=" + $scanPath) }
+    },
+    @{
+        Name = "Kaspersky Endpoint Security"
+        MatchNames = @("Kaspersky Endpoint Security")
+        ExePaths = @(
+            (Join-Path $env:ProgramFiles "Kaspersky Lab\Kaspersky Endpoint Security for Windows\avp.com"),
+            (Join-Path $env:ProgramFiles(x86) "Kaspersky Lab\Kaspersky Endpoint Security for Windows\avp.com")
+        )
+        Args = { param($scanPath) @("scan", $scanPath) }
+    },
+    @{
+        Name = "Symantec Endpoint Protection"
+        MatchNames = @("Symantec Endpoint Protection")
+        ExePaths = @(
+            (Join-Path $env:ProgramFiles "Symantec\Symantec Endpoint Protection\DoScan.exe"),
+            (Join-Path $env:ProgramFiles(x86) "Symantec\Symantec Endpoint Protection\DoScan.exe")
+        )
+        Args = { param($scanPath) @("/Scan", $scanPath) }
+    },
+    @{
+        Name = "McAfee"
+        MatchNames = @("McAfee", "McAfee LiveSafe", "McAfee Small Business")
+        ExePaths = @(
+            (Join-Path $env:ProgramFiles "McAfee\VirusScan Enterprise\Scan32.exe"),
+            (Join-Path $env:ProgramFiles(x86) "McAfee\VirusScan Enterprise\Scan32.exe")
+        )
+        Args = { param($scanPath) @($scanPath) }
+    },
+    @{
+        Name = "Webroot SecureAnywhere"
+        MatchNames = @("Webroot SecureAnywhere")
+        ExePaths = @((Join-Path $env:ProgramFiles "Webroot\WRSA.exe"))
+        Args = $null
+    },
+    @{
+        Name = "CrowdStrike Falcon"
+        MatchNames = @("CrowdStrike Falcon")
+        ExePaths = @()
+        Args = $null
+    },
+    @{
+        Name = "Sentinel Agent"
+        MatchNames = @("Sentinel Agent", "SentinelOne")
+        ExePaths = @()
+        Args = $null
+    },
+    @{
+        Name = "LogMeIn AV"
+        MatchNames = @("LogMeIn AV")
+        ExePaths = @()
+        Args = $null
+    }
+)
+
+function Get-InstalledAvProducts {
+    $uninstallPaths = @(
+        "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*",
+        "HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*"
+    )
+    $names = foreach ($path in $uninstallPaths) {
+        Get-ItemProperty -Path $path -ErrorAction SilentlyContinue |
+            Where-Object { $_.DisplayName } |
+            Select-Object -ExpandProperty DisplayName
+    }
+    return $names | Sort-Object -Unique
+}
+
+function Get-ExistingExePath {
+    param([string[]]$Paths)
+    foreach ($path in $Paths) {
+        if ($path -and (Test-Path $path)) {
+            return $path
+        }
+    }
+    return $null
+}
+
+function Invoke-PostCopyScan {
+    param([Parameter(Mandatory = $true)][string]$ScanPath)
+    $installedProducts = Get-InstalledAvProducts
+    $scanStarted = $false
+    $scanSucceeded = $false
+
+    foreach ($config in $avCliOverrides) {
+        $matched = $false
+        foreach ($name in $config.MatchNames) {
+            if ($installedProducts -match [regex]::Escape($name)) {
+                $matched = $true
+                break
+            }
+        }
+
+        $exePath = Get-ExistingExePath -Paths $config.ExePaths
+        if (-not $matched -and -not $exePath) { continue }
+
+        if (-not $exePath) {
+            Write-Log ("Post-copy scan skipped for " + $config.Name + "; executable not found.")
+            return $false
+        }
+        if (-not $config.Args) {
+            Write-Log ("Post-copy scan not configured for " + $config.Name + "; update avCliOverrides to enable.")
+            return $false
+        }
+
+        try {
+            Write-Log ("Post-copy scan started: " + $config.Name + " -> " + $ScanPath)
+            $args = & $config.Args $ScanPath
+            $scanProcess = Start-Process -FilePath $exePath -ArgumentList $args -NoNewWindow -Wait -PassThru
+            Write-Log ("Post-copy scan finished: " + $config.Name + " ExitCode: " + $scanProcess.ExitCode)
+            $scanStarted = $true
+            if ($scanProcess.ExitCode -eq 0) {
+                $scanSucceeded = $true
+            } else {
+                $scanSucceeded = $false
+            }
+            return $scanSucceeded
+        } catch {
+            Write-Log ("Post-copy scan failed: " + $config.Name + " | " + $_.Exception.Message)
+            return $false
+        }
+    }
+
+    if (-not $scanStarted) {
+        Write-Log "Post-copy scan skipped; no supported AV CLI found."
+        return $false
+    }
+    return $scanSucceeded
+}
+
 $jobStart = Get-Date
 $jobEnd = $jobStart.AddMinutes($maxRunMinutes)
 $script:timeLimitReached = $false
@@ -245,20 +402,11 @@ Write-Log ("Total bytes copied: " + $totalBytes)
 Write-Log ("Timed out: " + $script:timeLimitReached)
 Write-Log "Copy job finished."
 
-# Needs windows defender to be installed and running
-$defenderExe = Join-Path $env:ProgramFiles "Windows Defender\MpCmdRun.exe"
-if (Test-Path $defenderExe) {
-    try {
-        Write-Log ("Post-copy scan started: " + $destinationRoot)
-        $scanProcess = Start-Process -FilePath $defenderExe -ArgumentList @(
-            "-Scan", "-ScanType", "3", "-File", $destinationRoot
-        ) -NoNewWindow -Wait -PassThru
-        Write-Log ("Post-copy scan finished. ExitCode: " + $scanProcess.ExitCode)
-    } catch {
-        Write-Log ("Post-copy scan failed: " + $_.Exception.Message)
-    }
-} else {
-    Write-Log ("Post-copy scan skipped; MpCmdRun.exe not found at: " + $defenderExe)
+$scanOk = Invoke-PostCopyScan -ScanPath $destinationRoot
+if (-not $scanOk) {
+    Write-Log "Post-copy scan failed or unavailable. Exiting with error."
+    Write-Host "Copy complete, but antivirus scan failed or was unavailable."
+    exit 2
 }
 
 Write-Host "Copy complete."
