@@ -74,10 +74,10 @@ $allowedExtensions = @(
     ".vsd", ".vsdx",
     ".zip"
 )
-
-$sourceSubfolders = @("Desktop", "Downloads", "Documents", "OneDrive", "Pictures")
+# Not including OneDrive or Downloads
+$sourceSubfolders = @("Desktop", "Documents", "Pictures")
 $usersRoot = "C:\Users"
-$excludedUsers = @("Default", "Default User", "All Users", "DefaultAppPool", "WDAGUtilityAccount")
+$excludedUsers = @("Default", "Default User", "All Users", "DefaultAppPool", "WDAGUtilityAccount", "LogMeInRemoteUser")
 $rootScanPath = "C:\"
 $rootCopyFolderName = "_RootDrive"
 $excludedRootPrefixes = @(
@@ -125,7 +125,10 @@ Write-Log ("PropertyPcDetails: " + $propertyPcDetailsName)
 Write-Log ("DestinationRoot: " + $destinationRoot)
 
 $userProfiles = Get-ChildItem -Path $usersRoot -Directory -ErrorAction SilentlyContinue |
-    Where-Object { $excludedUsers -notcontains $_.Name }
+    Where-Object {
+        ($excludedUsers -notcontains $_.Name) -and
+        ($_.Name -notlike "LogMeInRemoteUser*")
+    }
 
 $matchedCount = 0
 $copiedCount = 0
@@ -241,6 +244,22 @@ Write-Log ("Copy errors: " + $errorCount)
 Write-Log ("Total bytes copied: " + $totalBytes)
 Write-Log ("Timed out: " + $script:timeLimitReached)
 Write-Log "Copy job finished."
+
+# Needs windows defender to be installed and running
+$defenderExe = Join-Path $env:ProgramFiles "Windows Defender\MpCmdRun.exe"
+if (Test-Path $defenderExe) {
+    try {
+        Write-Log ("Post-copy scan started: " + $destinationRoot)
+        $scanProcess = Start-Process -FilePath $defenderExe -ArgumentList @(
+            "-Scan", "-ScanType", "3", "-File", $destinationRoot
+        ) -NoNewWindow -Wait -PassThru
+        Write-Log ("Post-copy scan finished. ExitCode: " + $scanProcess.ExitCode)
+    } catch {
+        Write-Log ("Post-copy scan failed: " + $_.Exception.Message)
+    }
+} else {
+    Write-Log ("Post-copy scan skipped; MpCmdRun.exe not found at: " + $defenderExe)
+}
 
 Write-Host "Copy complete."
 exit 0
