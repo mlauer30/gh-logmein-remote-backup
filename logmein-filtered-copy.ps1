@@ -80,7 +80,14 @@ $usersRoot = "C:\Users"
 $excludedUsers = @("Default", "Default User", "All Users", "DefaultAppPool", "WDAGUtilityAccount")
 $rootScanPath = "C:\"
 $rootCopyFolderName = "_RootDrive"
-$excludedRootPrefixes = @("C:\Windows", "C:\Program Files", "C:\Program Files (x86)")
+$excludedRootPrefixes = @(
+    "C:\Windows",
+    "C:\Windows.old",
+    "C:\Program Files",
+    "C:\Program Files (x86)",
+    "C:\ProgramData",
+    "C:\Recovery"
+)
 
 if (-not (Test-Path $destinationRoot)) {
     New-Item -Path $destinationRoot -ItemType Directory -Force | Out-Null
