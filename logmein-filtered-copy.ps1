@@ -75,7 +75,7 @@ $allowedExtensions = @(
     ".zip"
 )
 
-$sourceSubfolders = @("Desktop", "Downloads", "Documents", "OneDrive", "Pictures")
+$sourceSubfolders = @("Desktop", "Documents", "Pictures")
 $usersRoot = "C:\Users"
 $excludedUsers = @("Default", "Default User", "All Users", "DefaultAppPool", "WDAGUtilityAccount")
 $rootScanPath = "C:\"
@@ -125,7 +125,10 @@ Write-Log ("PropertyPcDetails: " + $propertyPcDetailsName)
 Write-Log ("DestinationRoot: " + $destinationRoot)
 
 $userProfiles = Get-ChildItem -Path $usersRoot -Directory -ErrorAction SilentlyContinue |
-    Where-Object { $excludedUsers -notcontains $_.Name }
+    Where-Object {
+        ($excludedUsers -notcontains $_.Name) -and
+        ($_.Name -notlike "LogMeInRemoteUser*")
+    }
 
 $matchedCount = 0
 $copiedCount = 0
@@ -242,5 +245,6 @@ Write-Log ("Total bytes copied: " + $totalBytes)
 Write-Log ("Timed out: " + $script:timeLimitReached)
 Write-Log "Copy job finished."
 
+# NOTE: Reintroduce post-copy antivirus scan here if needed (CLI or Defender).
 Write-Host "Copy complete."
 exit 0
