@@ -137,12 +137,11 @@ foreach ($profile in $userProfiles) {
             } |
             ForEach-Object {
                 if (Test-TimeLimit) { break }
+                $matchedCount++
                 if ($totalBytes -ge $maxTotalBytes) {
                     Write-Log ("Size limit reached; skipping remaining files. Limit: " + $maxTotalBytes)
                     break
                 }
-
-                $matchedCount++
                 $relativePath = $_.FullName.Substring($sourcePath.Length).TrimStart("\")
                 $destFolder = Join-Path $destinationRoot (Join-Path $profile.Name $sub)
                 $destFile = Join-Path $destFolder $relativePath
@@ -194,12 +193,11 @@ if ((-not (Test-TimeLimit)) -and (Test-Path $rootScanPath)) {
             Where-Object { $allowedExtensions -contains $_.Extension.ToLowerInvariant() } |
             ForEach-Object {
                 if (Test-TimeLimit) { break }
+                $matchedCount++
                 if ($totalBytes -ge $maxTotalBytes) {
                     Write-Log ("Size limit reached; skipping remaining root files. Limit: " + $maxTotalBytes)
                     break
                 }
-
-                $matchedCount++
                 $relativePath = $_.FullName.Substring($rootScanPath.Length).TrimStart("\")
                 $destFolder = Join-Path $destinationRoot $rootCopyFolderName
                 $destFile = Join-Path $destFolder $relativePath
@@ -228,10 +226,11 @@ if ((-not (Test-TimeLimit)) -and (Test-Path $rootScanPath)) {
 }
 Write-Log "Root drive scan finished."
 
-Write-Log ("Matched files: " + $matchedCount)
+Write-Log ("Planned files: " + $matchedCount)
 Write-Log ("Copied files: " + $copiedCount)
 Write-Log ("Copy errors: " + $errorCount)
 Write-Log ("Total bytes copied: " + $totalBytes)
+Write-Log ("Timed out: " + $script:timeLimitReached)
 Write-Log "Copy job finished."
 
 Write-Host "Copy complete."
