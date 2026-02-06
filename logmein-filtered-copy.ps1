@@ -68,6 +68,8 @@ $allowedExtensions = @(
     ".xls", ".xlsx", ".xlt", ".xltx", ".csv",
     ".ppt", ".pptx", ".pot", ".potx",
     ".rtf",
+    ".txt",
+    ".md",
     ".one", ".onepkg",
     ".vsd", ".vsdx",
     ".zip"
