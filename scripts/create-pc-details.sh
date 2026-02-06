@@ -1,13 +1,15 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-root_dir="${1:-PropertyDetailJsons}"
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+default_root="${script_dir}/../PropertyDetailJsons"
+root_dir="${1:-$default_root}"
 force_write="false"
 
 if [[ "${2:-}" == "--force" || "${1:-}" == "--force" ]]; then
   force_write="true"
   if [[ "${1:-}" == "--force" ]]; then
-    root_dir="${2:-PropertyDetailJsons}"
+    root_dir="${2:-$default_root}"
   fi
 fi
 
