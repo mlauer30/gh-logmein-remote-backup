@@ -4,6 +4,7 @@ $ErrorActionPreference = "Stop"
 $stagingRoot = "C:\Staging_Logmein_central"
 $archiveFolderName = "01_PCARCHIVE"
 $maxTotalBytes = 60GB
+$maxRunMinutes = 30
 
 $pcDetailsMapping = "C:\PcDetails.json"
 
@@ -95,6 +96,20 @@ function Write-Log {
     Add-Content -Path $logFile -Value $line
 }
 
+$jobStart = Get-Date
+$jobEnd = $jobStart.AddMinutes($maxRunMinutes)
+$script:timeLimitReached = $false
+function Test-TimeLimit {
+    if ((Get-Date) -ge $jobEnd) {
+        if (-not $script:timeLimitReached) {
+            Write-Log ("Time limit reached; stopping copy job. Limit minutes: " + $maxRunMinutes)
+        }
+        $script:timeLimitReached = $true
+        return $true
+    }
+    return $false
+}
+
 Write-Log "Copy job started."
 Write-Log ("ComputerName: " + $computerName)
 Write-Log ("PropertyPcDetails: " + $propertyPcDetailsName)
@@ -109,7 +124,9 @@ $errorCount = 0
 $totalBytes = 0
 
 foreach ($profile in $userProfiles) {
+    if (Test-TimeLimit) { break }
     foreach ($sub in $sourceSubfolders) {
+        if (Test-TimeLimit) { break }
         $sourcePath = Join-Path $profile.FullName $sub
         if (-not (Test-Path $sourcePath)) { continue }
 
@@ -119,6 +136,7 @@ foreach ($profile in $userProfiles) {
                 $allowedExtensions -contains $ext
             } |
             ForEach-Object {
+                if (Test-TimeLimit) { break }
                 if ($totalBytes -ge $maxTotalBytes) {
                     Write-Log ("Size limit reached; skipping remaining files. Limit: " + $maxTotalBytes)
                     break
@@ -150,10 +168,11 @@ foreach ($profile in $userProfiles) {
                 }
             }
     }
+    if ($script:timeLimitReached) { break }
 }
 
 Write-Log "Root drive scan started."
-if (Test-Path $rootScanPath) {
+if ((-not (Test-TimeLimit)) -and (Test-Path $rootScanPath)) {
     $rootFolders = Get-ChildItem -Path $rootScanPath -Directory -ErrorAction SilentlyContinue |
         Where-Object {
             $fullName = $_.FullName
@@ -165,6 +184,7 @@ if (Test-Path $rootScanPath) {
         }
 
     foreach ($folder in $rootFolders) {
+        if (Test-TimeLimit) { break }
         if ($totalBytes -ge $maxTotalBytes) {
             Write-Log ("Size limit reached; skipping remaining root folders. Limit: " + $maxTotalBytes)
             break
@@ -173,6 +193,7 @@ if (Test-Path $rootScanPath) {
         Get-ChildItem -Path $folder.FullName -Recurse -File -ErrorAction SilentlyContinue |
             Where-Object { $allowedExtensions -contains $_.Extension.ToLowerInvariant() } |
             ForEach-Object {
+                if (Test-TimeLimit) { break }
                 if ($totalBytes -ge $maxTotalBytes) {
                     Write-Log ("Size limit reached; skipping remaining root files. Limit: " + $maxTotalBytes)
                     break
