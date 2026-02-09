@@ -1,7 +1,6 @@
 # RUN COMMAND in LogMeIn Central: 
 # To refer to an uploaded file, copy its name (including extension) into your script. To include the file's path in your script, use the environment variable %central_FilePath%
-
-For example: Copy-Item filename.png C:\Destination
+#For example: Copy-Item filename.png C:\Destination
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
@@ -79,11 +78,8 @@ $allowedExtensions = @(
     ".vsd", ".vsdx",
     ".zip"
 )
-<<<<<<< HEAD
 # Not including OneDrive or Downloads
-=======
-
->>>>>>> origin/main
+# =======
 $sourceSubfolders = @("Desktop", "Documents", "Pictures")
 $usersRoot = "C:\Users"
 $excludedUsers = @("Default", "Default User", "All Users", "DefaultAppPool", "WDAGUtilityAccount", "LogMeInRemoteUser")
@@ -114,192 +110,6 @@ function Write-Log {
     Add-Content -Path $logFile -Value $line
 }
 
-<<<<<<< HEAD
-# Configure AV CLI mappings here when needed.
-$avCliOverrides = @(
-    @{
-        Name = "Windows Defender"
-        MatchNames = @("Windows Defender", "Microsoft Defender", "Microsoft Defender ATP", "Microsoft Security Essentials")
-        ExePaths = @(
-            (Join-Path $env:ProgramFiles "Windows Defender\MpCmdRun.exe"),
-            (Join-Path $env:ProgramFiles "Microsoft Security Client\MpCmdRun.exe")
-        )
-        Args = { param($scanPath) @("-Scan", "-ScanType", "3", "-File", $scanPath) }
-    },
-    @{
-        Name = "Avast Free Antivirus"
-        MatchNames = @("Avast", "Avast! Free Antivirus")
-        ExePaths = @(
-            (Join-Path $env:ProgramFiles "Avast Software\Avast\AvastCmd.exe"),
-            (Join-Path $env:ProgramFiles "AVAST Software\Avast\AvastCmd.exe")
-        )
-        Args = { param($scanPath) @("scan", $scanPath) }
-    },
-    @{
-        Name = "AVG AntiVirus Free"
-        MatchNames = @("AVG AntiVirus Free", "AVG Antivirus")
-        ExePaths = @(
-            (Join-Path $env:ProgramFiles "AVG\Antivirus\avgscanx.exe"),
-            (Join-Path $env:ProgramFiles(x86) "AVG\Antivirus\avgscanx.exe")
-        )
-        Args = { param($scanPath) @("/SCAN=" + $scanPath) }
-    },
-    @{
-        Name = "Kaspersky Endpoint Security"
-        MatchNames = @("Kaspersky Endpoint Security")
-        ExePaths = @(
-            (Join-Path $env:ProgramFiles "Kaspersky Lab\Kaspersky Endpoint Security for Windows\avp.com"),
-            (Join-Path $env:ProgramFiles(x86) "Kaspersky Lab\Kaspersky Endpoint Security for Windows\avp.com")
-        )
-        Args = { param($scanPath) @("scan", $scanPath) }
-    },
-    @{
-        Name = "Symantec Endpoint Protection"
-        MatchNames = @("Symantec Endpoint Protection")
-        ExePaths = @(
-            (Join-Path $env:ProgramFiles "Symantec\Symantec Endpoint Protection\DoScan.exe"),
-            (Join-Path $env:ProgramFiles(x86) "Symantec\Symantec Endpoint Protection\DoScan.exe")
-        )
-        Args = { param($scanPath) @("/Scan", $scanPath) }
-    },
-    @{
-        Name = "McAfee"
-        MatchNames = @("McAfee", "McAfee LiveSafe", "McAfee Small Business")
-        ExePaths = @(
-            (Join-Path $env:ProgramFiles "McAfee\VirusScan Enterprise\Scan32.exe"),
-            (Join-Path $env:ProgramFiles(x86) "McAfee\VirusScan Enterprise\Scan32.exe")
-        )
-        Args = { param($scanPath) @($scanPath) }
-    },
-    @{
-        Name = "Webroot SecureAnywhere"
-        MatchNames = @("Webroot SecureAnywhere")
-        ExePaths = @((Join-Path $env:ProgramFiles "Webroot\WRSA.exe"))
-        Args = $null
-    },
-    @{
-        Name = "CrowdStrike Falcon"
-        MatchNames = @("CrowdStrike Falcon")
-        ExePaths = @()
-        Args = $null
-    },
-    @{
-        Name = "Sentinel Agent"
-        MatchNames = @("Sentinel Agent", "SentinelOne")
-        ExePaths = @()
-        Args = $null
-    },
-    @{
-        Name = "LogMeIn AV"
-        MatchNames = @("LogMeIn AV")
-        ExePaths = @()
-        Args = $null
-    }
-)
-
-function Get-InstalledAvProducts {
-    $uninstallPaths = @(
-        "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*",
-        "HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*"
-    )
-    $names = foreach ($path in $uninstallPaths) {
-        Get-ItemProperty -Path $path -ErrorAction SilentlyContinue |
-            Where-Object { $_.DisplayName } |
-            Select-Object -ExpandProperty DisplayName
-    }
-    return $names | Sort-Object -Unique
-}
-
-function Get-ExistingExePath {
-    param([string[]]$Paths)
-    foreach ($path in $Paths) {
-        if ($path -and (Test-Path $path)) {
-            return $path
-        }
-    }
-    return $null
-}
-
-function Invoke-PostCopyScan {
-    param([Parameter(Mandatory = $true)][string]$ScanPath)
-    $installedProducts = Get-InstalledAvProducts
-    $scanStarted = $false
-    $scanSucceeded = $false
-
-    foreach ($config in $avCliOverrides) {
-        $matched = $false
-        foreach ($name in $config.MatchNames) {
-            if ($installedProducts -match [regex]::Escape($name)) {
-                $matched = $true
-                break
-            }
-        }
-
-        $exePath = Get-ExistingExePath -Paths $config.ExePaths
-        if (-not $matched -and -not $exePath) { continue }
-
-        if (-not $exePath) {
-            Write-Log ("Post-copy scan skipped for " + $config.Name + "; executable not found.")
-            return $false
-        }
-        if (-not $config.Args) {
-            Write-Log ("Post-copy scan not configured for " + $config.Name + "; update avCliOverrides to enable.")
-            return $false
-        }
-
-        try {
-            Write-Log ("Post-copy scan started: " + $config.Name + " -> " + $ScanPath)
-            $args = & $config.Args $ScanPath
-            $scanProcess = Start-Process -FilePath $exePath -ArgumentList $args -NoNewWindow -Wait -PassThru
-            Write-Log ("Post-copy scan finished: " + $config.Name + " ExitCode: " + $scanProcess.ExitCode)
-            $scanStarted = $true
-            if ($scanProcess.ExitCode -eq 0) {
-                $scanSucceeded = $true
-            } else {
-                $scanSucceeded = $false
-            }
-            return $scanSucceeded
-        } catch {
-            Write-Log ("Post-copy scan failed: " + $config.Name + " | " + $_.Exception.Message)
-            return $false
-        }
-    }
-
-    if (-not $scanStarted) {
-        Write-Log "Post-copy scan skipped; no supported AV CLI found."
-        return $false
-    }
-    return $scanSucceeded
-}
-=======
-#region agent log
-$script:debugLogPath = "/mnt/c/Users/mlauer/Documents/Coding/gh-logmein-remote-backup/.cursor/debug.log"
-function Write-DebugLog {
-    param(
-        [Parameter(Mandatory = $true)][string]$HypothesisId,
-        [Parameter(Mandatory = $true)][string]$Location,
-        [Parameter(Mandatory = $true)][string]$Message,
-        [Parameter(Mandatory = $true)][hashtable]$Data,
-        [Parameter(Mandatory = $true)][string]$RunId
-    )
-    try {
-        $payload = @{
-            id = ("log_" + [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() + "_" + ([guid]::NewGuid().ToString("N").Substring(0, 6)))
-            timestamp = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
-            location = $Location
-            message = $Message
-            data = $Data
-            runId = $RunId
-            hypothesisId = $HypothesisId
-        }
-        Add-Content -Path $script:debugLogPath -Value ($payload | ConvertTo-Json -Compress)
-    } catch {
-        # ignore debug logging failures
-    }
-}
-#endregion
->>>>>>> origin/main
-
 $jobStart = Get-Date
 $jobEnd = $jobStart.AddMinutes($maxRunMinutes)
 $script:timeLimitReached = $false
@@ -319,12 +129,12 @@ Write-Log ("ComputerName: " + $computerName)
 Write-Log ("PropertyPcDetails: " + $propertyPcDetailsName)
 Write-Log ("DestinationRoot: " + $destinationRoot)
 #region agent log
-Write-DebugLog -HypothesisId "H1" -Location "logmein-filtered-copy.ps1:126" -Message "Config resolved" -Data @{
-    destinationRoot = $destinationRoot
-    stagingRoot = $stagingRoot
-    propertyFolder = $propertyPcDetailsName
-    targetFolder = $targetFolder
-} -RunId "pre-fix"
+#Write-DebugLog -HypothesisId "H1" -Location "logmein-filtered-copy.ps1:126" -Message "Config resolved" -Data @{
+#    destinationRoot = $destinationRoot
+#    stagingRoot = $stagingRoot
+#    propertyFolder = $propertyPcDetailsName
+#    targetFolder = $targetFolder
+#} -RunId "pre-fix"
 #endregion
 
 $userProfiles = Get-ChildItem -Path $usersRoot -Directory -ErrorAction SilentlyContinue |
@@ -338,10 +148,10 @@ $copiedCount = 0
 $errorCount = 0
 $totalBytes = 0
 #region agent log
-Write-DebugLog -HypothesisId "H2" -Location "logmein-filtered-copy.ps1:141" -Message "Profiles discovered" -Data @{
-    usersRoot = $usersRoot
-    profileCount = @($userProfiles).Count
-} -RunId "pre-fix"
+#Write-DebugLog -HypothesisId "H2" -Location "logmein-filtered-copy.ps1:141" -Message "Profiles discovered" -Data @{
+#    usersRoot = $usersRoot
+#    profileCount = @($userProfiles).Count
+#} -RunId "pre-fix"
 #endregion
 
 foreach ($profile in $userProfiles) {
@@ -352,11 +162,11 @@ foreach ($profile in $userProfiles) {
         if (-not (Test-Path $sourcePath)) { continue }
 
 #region agent log
-        Write-DebugLog -HypothesisId "H3" -Location "logmein-filtered-copy.ps1:154" -Message "Source path exists" -Data @{
-            profile = $profile.Name
-            subfolder = $sub
-            sourcePath = $sourcePath
-        } -RunId "pre-fix"
+       # Write-DebugLog -HypothesisId "H3" -Location "logmein-filtered-copy.ps1:154" -Message "Source path exists" -Data @{
+       #     profile = $profile.Name
+       #     subfolder = $sub
+       #     sourcePath = $sourcePath
+       # } -RunId "pre-fix"
 #endregion
 
         Get-ChildItem -Path $sourcePath -Recurse -File -ErrorAction SilentlyContinue |
@@ -391,23 +201,23 @@ foreach ($profile in $userProfiles) {
                     $copiedCount++
                     $totalBytes += $fileSize
 #region agent log
-                    if ($copiedCount -le 5) {
-                        Write-DebugLog -HypothesisId "H4" -Location "logmein-filtered-copy.ps1:185" -Message "File copied" -Data @{
-                            sourceFile = $sourceFile
-                            destFile = $destFile
-                            totalBytes = $totalBytes
-                        } -RunId "pre-fix"
-                    }
+                    #if ($copiedCount -le 5) {
+                    #    Write-DebugLog -HypothesisId "H4" -Location "logmein-filtered-copy.ps1:185" -Message "File copied" -Data @{
+                    #        sourceFile = $sourceFile
+                    #        destFile = $destFile
+                    #        totalBytes = $totalBytes
+                    #    } -RunId "pre-fix"
+                    #}
 #endregion
                 } catch {
                     $errorCount++
                     Write-Log ("Copy failed: " + $sourceFile + " -> " + $destFile + " | " + $_.Exception.Message)
 #region agent log
-                    Write-DebugLog -HypothesisId "H5" -Location "logmein-filtered-copy.ps1:193" -Message "Copy failed" -Data @{
-                        sourceFile = $sourceFile
-                        destFile = $destFile
-                        error = $_.Exception.Message
-                    } -RunId "pre-fix"
+                    #Write-DebugLog -HypothesisId "H5" -Location "logmein-filtered-copy.ps1:193" -Message "Copy failed" -Data @{
+                    #    sourceFile = $sourceFile
+                    #    destFile = $destFile
+                    #    error = $_.Exception.Message
+                    #} -RunId "pre-fix"
 #endregion
                 }
             }
