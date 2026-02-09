@@ -1,3 +1,8 @@
+# RUN COMMAND in LogMeIn Central: 
+# To refer to an uploaded file, copy its name (including extension) into your script. To include the file's path in your script, use the environment variable %central_FilePath%
+
+For example: Copy-Item filename.png C:\Destination
+
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
@@ -74,7 +79,11 @@ $allowedExtensions = @(
     ".vsd", ".vsdx",
     ".zip"
 )
+<<<<<<< HEAD
 # Not including OneDrive or Downloads
+=======
+
+>>>>>>> origin/main
 $sourceSubfolders = @("Desktop", "Documents", "Pictures")
 $usersRoot = "C:\Users"
 $excludedUsers = @("Default", "Default User", "All Users", "DefaultAppPool", "WDAGUtilityAccount", "LogMeInRemoteUser")
@@ -105,6 +114,7 @@ function Write-Log {
     Add-Content -Path $logFile -Value $line
 }
 
+<<<<<<< HEAD
 # Configure AV CLI mappings here when needed.
 $avCliOverrides = @(
     @{
@@ -261,6 +271,34 @@ function Invoke-PostCopyScan {
     }
     return $scanSucceeded
 }
+=======
+#region agent log
+$script:debugLogPath = "/mnt/c/Users/mlauer/Documents/Coding/gh-logmein-remote-backup/.cursor/debug.log"
+function Write-DebugLog {
+    param(
+        [Parameter(Mandatory = $true)][string]$HypothesisId,
+        [Parameter(Mandatory = $true)][string]$Location,
+        [Parameter(Mandatory = $true)][string]$Message,
+        [Parameter(Mandatory = $true)][hashtable]$Data,
+        [Parameter(Mandatory = $true)][string]$RunId
+    )
+    try {
+        $payload = @{
+            id = ("log_" + [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() + "_" + ([guid]::NewGuid().ToString("N").Substring(0, 6)))
+            timestamp = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+            location = $Location
+            message = $Message
+            data = $Data
+            runId = $RunId
+            hypothesisId = $HypothesisId
+        }
+        Add-Content -Path $script:debugLogPath -Value ($payload | ConvertTo-Json -Compress)
+    } catch {
+        # ignore debug logging failures
+    }
+}
+#endregion
+>>>>>>> origin/main
 
 $jobStart = Get-Date
 $jobEnd = $jobStart.AddMinutes($maxRunMinutes)
@@ -280,6 +318,14 @@ Write-Log "Copy job started."
 Write-Log ("ComputerName: " + $computerName)
 Write-Log ("PropertyPcDetails: " + $propertyPcDetailsName)
 Write-Log ("DestinationRoot: " + $destinationRoot)
+#region agent log
+Write-DebugLog -HypothesisId "H1" -Location "logmein-filtered-copy.ps1:126" -Message "Config resolved" -Data @{
+    destinationRoot = $destinationRoot
+    stagingRoot = $stagingRoot
+    propertyFolder = $propertyPcDetailsName
+    targetFolder = $targetFolder
+} -RunId "pre-fix"
+#endregion
 
 $userProfiles = Get-ChildItem -Path $usersRoot -Directory -ErrorAction SilentlyContinue |
     Where-Object {
@@ -291,6 +337,12 @@ $matchedCount = 0
 $copiedCount = 0
 $errorCount = 0
 $totalBytes = 0
+#region agent log
+Write-DebugLog -HypothesisId "H2" -Location "logmein-filtered-copy.ps1:141" -Message "Profiles discovered" -Data @{
+    usersRoot = $usersRoot
+    profileCount = @($userProfiles).Count
+} -RunId "pre-fix"
+#endregion
 
 foreach ($profile in $userProfiles) {
     if (Test-TimeLimit) { break }
@@ -298,6 +350,14 @@ foreach ($profile in $userProfiles) {
         if (Test-TimeLimit) { break }
         $sourcePath = Join-Path $profile.FullName $sub
         if (-not (Test-Path $sourcePath)) { continue }
+
+#region agent log
+        Write-DebugLog -HypothesisId "H3" -Location "logmein-filtered-copy.ps1:154" -Message "Source path exists" -Data @{
+            profile = $profile.Name
+            subfolder = $sub
+            sourcePath = $sourcePath
+        } -RunId "pre-fix"
+#endregion
 
         Get-ChildItem -Path $sourcePath -Recurse -File -ErrorAction SilentlyContinue |
             Where-Object {
@@ -330,9 +390,25 @@ foreach ($profile in $userProfiles) {
                     Copy-Item -Path $sourceFile -Destination $destFile -Force -ErrorAction Stop
                     $copiedCount++
                     $totalBytes += $fileSize
+#region agent log
+                    if ($copiedCount -le 5) {
+                        Write-DebugLog -HypothesisId "H4" -Location "logmein-filtered-copy.ps1:185" -Message "File copied" -Data @{
+                            sourceFile = $sourceFile
+                            destFile = $destFile
+                            totalBytes = $totalBytes
+                        } -RunId "pre-fix"
+                    }
+#endregion
                 } catch {
                     $errorCount++
                     Write-Log ("Copy failed: " + $sourceFile + " -> " + $destFile + " | " + $_.Exception.Message)
+#region agent log
+                    Write-DebugLog -HypothesisId "H5" -Location "logmein-filtered-copy.ps1:193" -Message "Copy failed" -Data @{
+                        sourceFile = $sourceFile
+                        destFile = $destFile
+                        error = $_.Exception.Message
+                    } -RunId "pre-fix"
+#endregion
                 }
             }
     }
@@ -402,12 +478,9 @@ Write-Log ("Total bytes copied: " + $totalBytes)
 Write-Log ("Timed out: " + $script:timeLimitReached)
 Write-Log "Copy job finished."
 
-$scanOk = Invoke-PostCopyScan -ScanPath $destinationRoot
-if (-not $scanOk) {
-    Write-Log "Post-copy scan failed or unavailable. Exiting with error."
-    Write-Host "Copy complete, but antivirus scan failed or was unavailable."
-    exit 2
-}
+# NOTE: Reintroduce post-copy antivirus scan here if needed (CLI or Defender).
 
 Write-Host "Copy complete."
+Write-Host ("Destination root: " + $destinationRoot)
+Write-Host ("Log file: " + $logFile)
 exit 0
