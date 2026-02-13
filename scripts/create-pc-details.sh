@@ -2,7 +2,7 @@
 set -euo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-default_root="${script_dir}/../PropertyDetailJsons"
+default_root="${script_dir}/../PcMappings"
 root_dir="${1:-$default_root}"
 force_write="false"
 

@@ -86,6 +86,11 @@ $excludedUsers = @("Default", "Default User", "All Users", "DefaultAppPool", "WD
 $rootScanPath = "C:\"
 $rootCopyFolderName = "_RootDrive"
 $excludedRootPrefixes = @(
+    "C:\Apps",
+    "C:\Dell",
+    "C:\LocalStorage",
+    "C:\HP",
+    "C:\SWSETUP",
     "C:\Windows",
     "C:\Windows.old",
     "C:\Program Files",
