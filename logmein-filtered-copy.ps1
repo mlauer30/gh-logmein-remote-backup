@@ -88,6 +88,7 @@ $rootCopyFolderName = "_RootDrive"
 $excludedRootPrefixes = @(
     "C:\Apps",
     "C:\Dell",
+    "C:\Drivers",
     "C:\LocalStorage",
     "C:\HP",
     "C:\SWSETUP",

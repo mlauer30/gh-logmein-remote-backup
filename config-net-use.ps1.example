@@ -1,0 +1,9 @@
+# Example config for copy-staging-to-z-archive.ps1
+# Upload this file (as config.ps1 or similar) in LogMeIn Central, then run the main script.
+# Rename to config.ps1 and set your real values before uploading.
+# propertyFolder (e.g. "Haven Largo") is read from C:\PcDetails.json on the target PC.
+# netPath = $netIP + propertyFolder
+
+#   $netIP = "\\192.168.0.1\"
+#   $netUser = "superuser-role"
+#   $netPass = "superuser-password"

@@ -3,7 +3,7 @@
 ## Accessing share drive
 
 ```powershell
-net use Z: "\\{IP address of NTFS share}\{property name in share}" /user:universal-username "universal-password" /persistent:yes
+net use Z: "\\<IP address of NTFS share>\<property name in share>" /user:<universal-username> "<universal-password>" /persistent:yes
 ```
 ## Copy command
 
