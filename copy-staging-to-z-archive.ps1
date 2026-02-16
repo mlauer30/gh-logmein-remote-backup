@@ -46,7 +46,7 @@ if (-not (Test-Path $sourceRoot)) {
     exit 1
 }
 
-# Run net use + robocopy in a single cmd.exe process so the drive mapping is visible to the copy
+# Run net use + robocopy in one cmd.exe process (share mapping across commands)
 Write-Host "Mapping Z: drive to $netPath and copying..."
 $batchContent = @"
 @echo off
@@ -57,9 +57,9 @@ if not exist "$destinationRoot" mkdir "$destinationRoot"
 robocopy "$sourceRoot" "$destinationRoot" /E /NFL /NDL /NJH /NJS
 exit /b 0
 "@
-$batchPath = [System.IO.Path]::GetTempFileName() + ".bat"
-$batchContent | Out-File -FilePath $batchPath -Encoding ASCII
-& cmd /c "`"$batchPath`""
+$batchPath = Join-Path $env:TEMP "copy-to-z-archive.bat"
+$batchContent | Out-File -FilePath $batchPath -Encoding ASCII -Force
+cmd /c "`"$batchPath`""
 $exitCode = $LASTEXITCODE
 Remove-Item $batchPath -Force -ErrorAction SilentlyContinue
 if ($exitCode -ge 8) { Write-Host "Robocopy error: $exitCode"; exit 1 }
