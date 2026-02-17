@@ -1,15 +1,8 @@
-# Calls for troubleshooting in the logmein command prompt 
-
-## Accessing share drive
-
+# New Checking Workflow
+## Count files for given PC subfolder, use command: 
 ```powershell
-net use Z: "\\<IP address of NTFS share>\<property name in share>" /user:<universal-username> "<universal-password>" /persistent:yes
+(Get-ChildItem -Path . -File -Recurse).Count 
 ```
-## Copy command
-
-```powershell
-Copy-Item -Path "C:\Staging_Logmein_central" -Destination "Z:\01-PCARCHIVE" -Recurse -Force -ErrorAction Stop
-```
-
-## Property drive information
-FS2 FTP in logmein has all of the property credentials stored for reference
+---
+## Check difference in file total after copy is complete
+Next use the copy-log-*.txt to determine if difference is significant enough for restaging or to determine if a PC logged off during a copyto Q:\
