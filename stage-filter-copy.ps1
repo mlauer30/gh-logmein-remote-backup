@@ -5,6 +5,18 @@
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
+# Long path support: use \\?\ prefix so paths > 260 chars work when copying/creating dirs
+function Get-LongPath {
+    param([Parameter(Mandatory = $true)][string]$Path)
+    if ([string]::IsNullOrWhiteSpace($Path)) { return $Path }
+    $p = $Path.TrimEnd('\')
+    if ($p.StartsWith("\\?\")) { return $p }
+    if ($p.Length -ge 2 -and $p[1] -eq ':') { return "\\?\$p" }
+    $resolved = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($p)
+    if ($resolved.Length -ge 2 -and $resolved[1] -eq ':') { return "\\?\$resolved" }
+    return $p
+}
+
 $stagingRoot = "C:\Staging_Logmein_central"
 $archiveFolderName = "01_PCARCHIVE"
 $maxTotalBytes = 60GB
@@ -18,7 +30,7 @@ if (-not $stagingRoot) {
 }
 
 if (-not (Test-Path $stagingRoot)) {
-    New-Item -Path $stagingRoot -ItemType Directory -Force | Out-Null
+    [System.IO.Directory]::CreateDirectory((Get-LongPath $stagingRoot)) | Out-Null
 }
 
 $computerName = $env:COMPUTERNAME
@@ -103,7 +115,7 @@ $excludedRootPrefixes = @(
 )
 
 if (-not (Test-Path $destinationRoot)) {
-    New-Item -Path $destinationRoot -ItemType Directory -Force | Out-Null
+    [System.IO.Directory]::CreateDirectory((Get-LongPath $destinationRoot)) | Out-Null
 }
 
 $timestamp = Get-Date -Format "yyyyMMdd-HHmmss"
@@ -173,7 +185,7 @@ foreach ($profile in $userProfiles) {
 
                 $destDir = Split-Path $destFile -Parent
                 if (-not (Test-Path $destDir)) {
-                    New-Item -Path $destDir -ItemType Directory -Force | Out-Null
+                    [System.IO.Directory]::CreateDirectory((Get-LongPath $destDir)) | Out-Null
                 }
 
                 $sourceFile = $_.FullName
@@ -183,7 +195,7 @@ foreach ($profile in $userProfiles) {
                         Write-Log ("Skipping file due to size cap: " + $sourceFile)
                         return
                     }
-                    Copy-Item -Path $sourceFile -Destination $destFile -Force -ErrorAction Stop
+                    [System.IO.File]::Copy((Get-LongPath $sourceFile), (Get-LongPath $destFile), $true)
                     $copiedCount++
                     $totalBytes += $fileSize
                 } catch {
@@ -229,7 +241,7 @@ if ((-not (Test-TimeLimit)) -and (Test-Path $rootScanPath)) {
 
                 $destDir = Split-Path $destFile -Parent
                 if (-not (Test-Path $destDir)) {
-                    New-Item -Path $destDir -ItemType Directory -Force | Out-Null
+                    [System.IO.Directory]::CreateDirectory((Get-LongPath $destDir)) | Out-Null
                 }
 
                 $sourceFile = $_.FullName
@@ -239,7 +251,7 @@ if ((-not (Test-TimeLimit)) -and (Test-Path $rootScanPath)) {
                         Write-Log ("Skipping file due to size cap: " + $sourceFile)
                         return
                     }
-                    Copy-Item -Path $sourceFile -Destination $destFile -Force -ErrorAction Stop
+                    [System.IO.File]::Copy((Get-LongPath $sourceFile), (Get-LongPath $destFile), $true)
                     $copiedCount++
                     $totalBytes += $fileSize
                 } catch {
