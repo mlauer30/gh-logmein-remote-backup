@@ -1,6 +1,11 @@
 # RUN COMMAND in LogMeIn Central: 
 # To refer to an uploaded file, copy its name (including extension) into your script. To include the file's path in your script, use the environment variable %central_FilePath%
 #For example: Copy-Item filename.png C:\Destination
+# ContentType: Records = documents/data only; Images = image files only; All = both (default, backward compatible)
+param(
+    [ValidateSet("Records", "Images", "All")]
+    [string]$ContentType = "All"
+)
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
@@ -186,12 +191,16 @@ function Get-FlattenedDestinationPath {
 }
 
 $stagingRoot = "C:\Staging_Logmein_central"
+# Folder for image files that don't fit within the size limit (separate from staging)
+$overflowRoot = "C:\Staging_Logmein_overflow"
 $archiveFolderName = "01_PCARCHIVE"
-$maxTotalBytes = 60GB
+$maxTotalBytes = 30GB
 $maxRunMinutes = 30
 # Maximum destination path length (network shares often have stricter limits than local paths)
 # Set to 200 to leave room for network share UNC paths (e.g., \\server\share\...)
 $maxDestinationPathLength = 200
+# Overflow is on local drive; use longer limit so folder structure is preserved (no flattening)
+$maxDestinationPathLengthOverflow = 400
 
 $pcDetailsMapping = "C:\PcDetails.json"
 
@@ -242,14 +251,26 @@ if (-not $targetFolder) {
     exit 1
 }
 
-$destinationRoot = Join-Path $stagingRoot (Join-Path $propertyPcDetailsName (Join-Path $archiveFolderName $targetFolder))
-if (-not $destinationRoot) {
-    Write-Host "Destination root is empty."
+$destinationBase = Join-Path $stagingRoot (Join-Path $propertyPcDetailsName (Join-Path $archiveFolderName $targetFolder))
+if (-not $destinationBase) {
+    Write-Host "Destination base is empty."
     exit 1
 }
 
-$allowedExtensions = @(
-    ".jpg", ".jpeg", ".png", ".gif", ".bmp", ".tif", ".tiff", ".webp", ".heic", ".heif", ".raw", ".svg",
+# Stage records and images separately: subfolder under archive when ContentType is Records or Images
+$contentSubfolder = switch ($ContentType) {
+    "Records" { "Records" }
+    "Images"  { "Images" }
+    default   { $null }
+}
+$destinationRoot = if ($contentSubfolder) {
+    Join-Path $destinationBase $contentSubfolder
+} else {
+    $destinationBase
+}
+
+# Extension sets: Records = documents/data; Images = image files
+$recordExtensions = @(
     ".pdf",
     ".doc", ".docx", ".dot", ".dotx",
     ".xls", ".xlsx", ".xlt", ".xltx", ".csv",
@@ -261,6 +282,16 @@ $allowedExtensions = @(
     ".vsd", ".vsdx",
     ".zip"
 )
+$imageExtensions = @(
+    ".jpg", ".jpeg", ".png", ".gif", ".bmp", ".tif", ".tiff", ".webp", ".heic", ".heif", ".raw", ".svg"
+)
+$allowedExtensions = switch ($ContentType) {
+    "Records" { $recordExtensions }
+    "Images"  { $imageExtensions }
+    default   {
+        $recordExtensions + $imageExtensions
+    }
+}
 # Not including OneDrive or Downloads
 # =======
 $sourceSubfolders = @("Desktop", "Documents", "Pictures")
@@ -285,18 +316,25 @@ $excludedRootPrefixes = @(
     "C:\Recovery"
 )
 
-if (-not (Test-Path $destinationRoot)) {
+# When ContentType is All, log and path mapping live under destinationBase so both phases use the same log
+$logDestinationRoot = if ($ContentType -eq "All") { $destinationBase } else { $destinationRoot }
+if (-not (Test-Path $logDestinationRoot)) {
+    [System.IO.Directory]::CreateDirectory((Get-LongPath $logDestinationRoot)) | Out-Null
+}
+if ($ContentType -ne "All" -and -not (Test-Path $destinationRoot)) {
     [System.IO.Directory]::CreateDirectory((Get-LongPath $destinationRoot)) | Out-Null
 }
 
 $timestamp = Get-Date -Format "yyyyMMdd-HHmmss"
-$logFile = Join-Path $destinationRoot ("copy-log-" + $timestamp + ".txt")
+$logFile = Join-Path $logDestinationRoot ("copy-log-" + $timestamp + ".txt")
 if (-not $logFile) {
     Write-Host "Log file path is empty."
     exit 1
 }
-$pathMappingFile = Join-Path $destinationRoot ("path-mapping-" + $timestamp + ".txt")
+$pathMappingFile = Join-Path $logDestinationRoot ("path-mapping-" + $timestamp + ".txt")
+$imagesNotRetainedReportFile = Join-Path $logDestinationRoot ("images-not-retained-" + $timestamp + ".txt")
 $script:flattenedCount = 0
+$script:imagesNotRetainedList = @()
 
 function Write-Log {
     param([Parameter(Mandatory = $true)][string]$Message)
@@ -328,9 +366,13 @@ function Test-TimeLimit {
 }
 
 Write-Log "Copy job started."
+Write-Log ("ContentType: " + $ContentType)
 Write-Log ("ComputerName: " + $computerName)
 Write-Log ("PropertyPcDetails: " + $propertyPcDetailsName)
 Write-Log ("DestinationRoot: " + $destinationRoot)
+if ($ContentType -eq "All") {
+    Write-Log ("Images over " + $maxTotalBytes + " will be logged and reported (not copied).")
+}
 
 $userProfiles = Get-ChildItem -Path $usersRoot -Directory -ErrorAction SilentlyContinue |
     Where-Object {
@@ -343,163 +385,420 @@ $copiedCount = 0
 $errorCount = 0
 $enumErrorCount = 0
 $totalBytes = 0
+$script:overflowImageCount = 0
 
-foreach ($profile in $userProfiles) {
-    if (Test-TimeLimit) { break }
-    foreach ($sub in $sourceSubfolders) {
+if ($ContentType -eq "All") {
+    # ---------- Phase 1: Records first (to staging, up to 60GB) ----------
+    $phase1DestRoot = Join-Path $destinationBase "Records"
+    if (-not (Test-Path $phase1DestRoot)) {
+        [System.IO.Directory]::CreateDirectory((Get-LongPath $phase1DestRoot)) | Out-Null
+    }
+    Write-Log "Phase 1 (Records) started. Destination: $phase1DestRoot"
+
+    foreach ($profile in $userProfiles) {
         if (Test-TimeLimit) { break }
-        $sourcePath = Join-Path $profile.FullName $sub
-        if (-not (Test-Path $sourcePath)) { continue }
-
-        $enumFiles = Get-FilesRecursive -Path $sourcePath -AllowedExtensions $allowedExtensions -ErrorCallback {
-            param($msg)
-            $script:enumErrorCount++
-            Write-Log ("Enumeration warning: " + $msg)
-        }
-
-        foreach ($fileInfo in $enumFiles) {
+        foreach ($sub in $sourceSubfolders) {
             if (Test-TimeLimit) { break }
-            $matchedCount++
-            if ($totalBytes -ge $maxTotalBytes) {
-                Write-Log ("Size limit reached; skipping remaining files. Limit: " + $maxTotalBytes)
-                break
-            }
-            
-            # Convert long path back to normal path for relative calculation
-            $sourceFileNormal = $fileInfo.FullName
-            if ($sourceFileNormal.StartsWith("\\?\")) {
-                $sourceFileNormal = $sourceFileNormal.Substring(4)
-            }
-            
-            $relativePath = $sourceFileNormal.Substring($sourcePath.Length).TrimStart("\")
-            $destFolder = Join-Path $destinationRoot (Join-Path $profile.Name $sub)
-            $originalDestFile = Join-Path $destFolder $relativePath
-            
-            # Check and flatten path if it exceeds maximum length for network shares
-            $pathInfo = Get-FlattenedDestinationPath -DestinationRoot $destFolder -RelativePath $relativePath -MaxLength $maxDestinationPathLength
-            
-            if ($pathInfo.WasFlattened) {
-                $script:flattenedCount++
-                Write-PathMapping -OriginalPath $originalDestFile -FlattenedPath $pathInfo.DestinationPath
-                Write-Log ("Path flattened (too long): " + $originalDestFile + " -> " + $pathInfo.DestinationPath)
-            }
-            
-            $destFile = $pathInfo.DestinationPath
-            $destDir = Split-Path $destFile -Parent
-            if (-not (Test-Path $destDir)) {
-                [System.IO.Directory]::CreateDirectory((Get-LongPath $destDir)) | Out-Null
+            $sourcePath = Join-Path $profile.FullName $sub
+            if (-not (Test-Path $sourcePath)) { continue }
+
+            $enumFiles = Get-FilesRecursive -Path $sourcePath -AllowedExtensions $recordExtensions -ErrorCallback {
+                param($msg)
+                $script:enumErrorCount++
+                Write-Log ("Enumeration warning: " + $msg)
             }
 
-            $sourceFile = $fileInfo.FullName
-            try {
-                $fileSize = $fileInfo.Length
-                if (($totalBytes + $fileSize) -gt $maxTotalBytes) {
-                    Write-Log ("Skipping file due to size cap: " + $sourceFileNormal)
-                    continue
+            foreach ($fileInfo in $enumFiles) {
+                if (Test-TimeLimit) { break }
+                $matchedCount++
+                if ($totalBytes -ge $maxTotalBytes) {
+                    Write-Log ("Size limit reached; skipping remaining files. Limit: " + $maxTotalBytes)
+                    break
                 }
-                [System.IO.File]::Copy((Get-LongPath $sourceFile), (Get-LongPath $destFile), $true)
-                $copiedCount++
-                $totalBytes += $fileSize
-            } catch {
-                $errorCount++
-                Write-Log ("Copy failed: " + $sourceFileNormal + " -> " + $destFile + " | " + $_.Exception.Message)
+                $sourceFileNormal = $fileInfo.FullName
+                if ($sourceFileNormal.StartsWith("\\?\")) { $sourceFileNormal = $sourceFileNormal.Substring(4) }
+                $relativePath = $sourceFileNormal.Substring($sourcePath.Length).TrimStart("\")
+                $destFolder = Join-Path $phase1DestRoot (Join-Path $profile.Name $sub)
+                $originalDestFile = Join-Path $destFolder $relativePath
+                $pathInfo = Get-FlattenedDestinationPath -DestinationRoot $destFolder -RelativePath $relativePath -MaxLength $maxDestinationPathLength
+                if ($pathInfo.WasFlattened) {
+                    $script:flattenedCount++
+                    Write-PathMapping -OriginalPath $originalDestFile -FlattenedPath $pathInfo.DestinationPath
+                    Write-Log ("Path flattened (too long): " + $originalDestFile + " -> " + $pathInfo.DestinationPath)
+                }
+                $destFile = $pathInfo.DestinationPath
+                $destDir = Split-Path $destFile -Parent
+                if (-not (Test-Path $destDir)) {
+                    [System.IO.Directory]::CreateDirectory((Get-LongPath $destDir)) | Out-Null
+                }
+                $sourceFile = $fileInfo.FullName
+                try {
+                    $fileSize = $fileInfo.Length
+                    if (($totalBytes + $fileSize) -gt $maxTotalBytes) {
+                        Write-Log ("Skipping file due to size cap: " + $sourceFileNormal)
+                        continue
+                    }
+                    [System.IO.File]::Copy((Get-LongPath $sourceFile), (Get-LongPath $destFile), $true)
+                    $copiedCount++
+                    $totalBytes += $fileSize
+                } catch {
+                    $errorCount++
+                    Write-Log ("Copy failed: " + $sourceFileNormal + " -> " + $destFile + " | " + $_.Exception.Message)
+                }
+            }
+        }
+        if ($script:timeLimitReached) { break }
+    }
+
+    Write-Log "Root drive scan started (Phase 1 - Records)."
+    if ((-not (Test-TimeLimit)) -and (Test-Path $rootScanPath)) {
+        $rootFolders = Get-ChildItem -Path $rootScanPath -Directory -ErrorAction SilentlyContinue |
+            Where-Object {
+                $fullName = $_.FullName
+                (-not $fullName.StartsWith($stagingRoot, [System.StringComparison]::OrdinalIgnoreCase)) -and
+                (-not $fullName.StartsWith($overflowRoot, [System.StringComparison]::OrdinalIgnoreCase)) -and
+                (-not $fullName.StartsWith($usersRoot, [System.StringComparison]::OrdinalIgnoreCase)) -and
+                (-not ($excludedRootPrefixes | Where-Object { $fullName.StartsWith($_, [System.StringComparison]::OrdinalIgnoreCase) }))
+            }
+        foreach ($folder in $rootFolders) {
+            if (Test-TimeLimit) { break }
+            if ($totalBytes -ge $maxTotalBytes) { break }
+            $enumFiles = Get-FilesRecursive -Path $folder.FullName -AllowedExtensions $recordExtensions -ErrorCallback {
+                param($msg)
+                $script:enumErrorCount++
+                Write-Log ("Enumeration warning: " + $msg)
+            }
+            foreach ($fileInfo in $enumFiles) {
+                if (Test-TimeLimit) { break }
+                $matchedCount++
+                if ($totalBytes -ge $maxTotalBytes) { break }
+                $sourceFileNormal = $fileInfo.FullName
+                if ($sourceFileNormal.StartsWith("\\?\")) { $sourceFileNormal = $sourceFileNormal.Substring(4) }
+                $relativePath = $sourceFileNormal.Substring($rootScanPath.Length).TrimStart("\")
+                $destFolder = Join-Path $phase1DestRoot $rootCopyFolderName
+                $originalDestFile = Join-Path $destFolder $relativePath
+                $pathInfo = Get-FlattenedDestinationPath -DestinationRoot $destFolder -RelativePath $relativePath -MaxLength $maxDestinationPathLength
+                if ($pathInfo.WasFlattened) {
+                    $script:flattenedCount++
+                    Write-PathMapping -OriginalPath $originalDestFile -FlattenedPath $pathInfo.DestinationPath
+                    Write-Log ("Path flattened (too long): " + $originalDestFile + " -> " + $pathInfo.DestinationPath)
+                }
+                $destFile = $pathInfo.DestinationPath
+                $destDir = Split-Path $destFile -Parent
+                if (-not (Test-Path $destDir)) {
+                    [System.IO.Directory]::CreateDirectory((Get-LongPath $destDir)) | Out-Null
+                }
+                $sourceFile = $fileInfo.FullName
+                try {
+                    $fileSize = $fileInfo.Length
+                    if (($totalBytes + $fileSize) -gt $maxTotalBytes) {
+                        Write-Log ("Skipping file due to size cap: " + $sourceFileNormal)
+                        continue
+                    }
+                    [System.IO.File]::Copy((Get-LongPath $sourceFile), (Get-LongPath $destFile), $true)
+                    $copiedCount++
+                    $totalBytes += $fileSize
+                } catch {
+                    $errorCount++
+                    Write-Log ("Copy failed: " + $sourceFileNormal + " -> " + $destFile + " | " + $_.Exception.Message)
+                }
             }
         }
     }
-    if ($script:timeLimitReached) { break }
-}
+    Write-Log "Phase 1 (Records) finished."
 
-Write-Log "Root drive scan started."
-if ((-not (Test-TimeLimit)) -and (Test-Path $rootScanPath)) {
-    $rootFolders = Get-ChildItem -Path $rootScanPath -Directory -ErrorAction SilentlyContinue |
-        Where-Object {
-            $fullName = $_.FullName
-            (-not $fullName.StartsWith($stagingRoot, [System.StringComparison]::OrdinalIgnoreCase)) -and
-            (-not $fullName.StartsWith($usersRoot, [System.StringComparison]::OrdinalIgnoreCase)) -and
-            (-not ($excludedRootPrefixes | Where-Object {
-                $fullName.StartsWith($_, [System.StringComparison]::OrdinalIgnoreCase)
-            }))
-        }
+    # ---------- Phase 2: Images last; staging until size limit, then log/report only (no copy) ----------
+    # Same folder structure: Username\Desktop|Documents|Pictures\... and _RootDrive\...
+    $imagesStagingRoot = Join-Path $destinationBase "Images"
+    if (-not (Test-Path $imagesStagingRoot)) {
+        [System.IO.Directory]::CreateDirectory((Get-LongPath $imagesStagingRoot)) | Out-Null
+    }
+    $script:imagePhaseOverLimit = $false
+    Write-Log "Phase 2 (Images) started. Staging: $imagesStagingRoot ; images over limit will be logged and reported (not copied)."
 
-    foreach ($folder in $rootFolders) {
+    foreach ($profile in $userProfiles) {
         if (Test-TimeLimit) { break }
-        if ($totalBytes -ge $maxTotalBytes) {
-            Write-Log ("Size limit reached; skipping remaining root folders. Limit: " + $maxTotalBytes)
-            break
-        }
-
-        $enumFiles = Get-FilesRecursive -Path $folder.FullName -AllowedExtensions $allowedExtensions -ErrorCallback {
-            param($msg)
-            $script:enumErrorCount++
-            Write-Log ("Enumeration warning: " + $msg)
-        }
-
-        foreach ($fileInfo in $enumFiles) {
+        foreach ($sub in $sourceSubfolders) {
             if (Test-TimeLimit) { break }
-            $matchedCount++
-            if ($totalBytes -ge $maxTotalBytes) {
-                Write-Log ("Size limit reached; skipping remaining root files. Limit: " + $maxTotalBytes)
-                break
-            }
-            
-            # Convert long path back to normal path for relative calculation
-            $sourceFileNormal = $fileInfo.FullName
-            if ($sourceFileNormal.StartsWith("\\?\")) {
-                $sourceFileNormal = $sourceFileNormal.Substring(4)
-            }
-            
-            $relativePath = $sourceFileNormal.Substring($rootScanPath.Length).TrimStart("\")
-            $destFolder = Join-Path $destinationRoot $rootCopyFolderName
-            $originalDestFile = Join-Path $destFolder $relativePath
-            
-            # Check and flatten path if it exceeds maximum length for network shares
-            $pathInfo = Get-FlattenedDestinationPath -DestinationRoot $destFolder -RelativePath $relativePath -MaxLength $maxDestinationPathLength
-            
-            if ($pathInfo.WasFlattened) {
-                $script:flattenedCount++
-                Write-PathMapping -OriginalPath $originalDestFile -FlattenedPath $pathInfo.DestinationPath
-                Write-Log ("Path flattened (too long): " + $originalDestFile + " -> " + $pathInfo.DestinationPath)
-            }
-            
-            $destFile = $pathInfo.DestinationPath
-            $destDir = Split-Path $destFile -Parent
-            if (-not (Test-Path $destDir)) {
-                [System.IO.Directory]::CreateDirectory((Get-LongPath $destDir)) | Out-Null
+            $sourcePath = Join-Path $profile.FullName $sub
+            if (-not (Test-Path $sourcePath)) { continue }
+
+            $enumFiles = Get-FilesRecursive -Path $sourcePath -AllowedExtensions $imageExtensions -ErrorCallback {
+                param($msg)
+                $script:enumErrorCount++
+                Write-Log ("Enumeration warning: " + $msg)
             }
 
-            $sourceFile = $fileInfo.FullName
-            try {
+            foreach ($fileInfo in $enumFiles) {
+                if (Test-TimeLimit) { break }
+                $matchedCount++
                 $fileSize = $fileInfo.Length
-                if (($totalBytes + $fileSize) -gt $maxTotalBytes) {
-                    Write-Log ("Skipping file due to size cap: " + $sourceFileNormal)
+                $sourceFileNormal = $fileInfo.FullName
+                if ($sourceFileNormal.StartsWith("\\?\")) { $sourceFileNormal = $sourceFileNormal.Substring(4) }
+
+                if (-not $script:imagePhaseOverLimit -and ($totalBytes + $fileSize -gt $maxTotalBytes)) {
+                    $script:imagePhaseOverLimit = $true
+                    Write-Log ("Size limit reached (" + $maxTotalBytes + "); remaining images will be logged as not retained (not copied).")
+                }
+
+                if ($script:imagePhaseOverLimit) {
+                    $script:overflowImageCount++
+                    $script:imagesNotRetainedList += [PSCustomObject]@{ Path = $sourceFileNormal; SizeBytes = $fileSize }
+                    Write-Log ("Image not retained (over limit): " + $sourceFileNormal + " (" + $fileSize + " bytes)")
                     continue
                 }
-                [System.IO.File]::Copy((Get-LongPath $sourceFile), (Get-LongPath $destFile), $true)
-                $copiedCount++
-                $totalBytes += $fileSize
-            } catch {
-                $errorCount++
-                Write-Log ("Copy failed: " + $sourceFileNormal + " -> " + $destFile + " | " + $_.Exception.Message)
+
+                $relativePath = $sourceFileNormal.Substring($sourcePath.Length).TrimStart("\")
+                $destFolder = Join-Path $imagesStagingRoot (Join-Path $profile.Name $sub)
+                $originalDestFile = Join-Path $destFolder $relativePath
+                $pathInfo = Get-FlattenedDestinationPath -DestinationRoot $destFolder -RelativePath $relativePath -MaxLength $maxDestinationPathLength
+                if ($pathInfo.WasFlattened) {
+                    $script:flattenedCount++
+                    Write-PathMapping -OriginalPath $originalDestFile -FlattenedPath $pathInfo.DestinationPath
+                    Write-Log ("Path flattened (too long): " + $originalDestFile + " -> " + $pathInfo.DestinationPath)
+                }
+                $destFile = $pathInfo.DestinationPath
+                $destDir = Split-Path $destFile -Parent
+                if (-not (Test-Path $destDir)) {
+                    [System.IO.Directory]::CreateDirectory((Get-LongPath $destDir)) | Out-Null
+                }
+                $sourceFile = $fileInfo.FullName
+                try {
+                    [System.IO.File]::Copy((Get-LongPath $sourceFile), (Get-LongPath $destFile), $true)
+                    $copiedCount++
+                    $totalBytes += $fileSize
+                } catch {
+                    $errorCount++
+                    Write-Log ("Copy failed: " + $sourceFileNormal + " -> " + $destFile + " | " + $_.Exception.Message)
+                }
+            }
+        }
+        if ($script:timeLimitReached) { break }
+    }
+
+    Write-Log "Root drive scan started (Phase 2 - Images)."
+    if ((-not (Test-TimeLimit)) -and (Test-Path $rootScanPath)) {
+        $rootFolders = Get-ChildItem -Path $rootScanPath -Directory -ErrorAction SilentlyContinue |
+            Where-Object {
+                $fullName = $_.FullName
+                (-not $fullName.StartsWith($stagingRoot, [System.StringComparison]::OrdinalIgnoreCase)) -and
+                (-not $fullName.StartsWith($overflowRoot, [System.StringComparison]::OrdinalIgnoreCase)) -and
+                (-not $fullName.StartsWith($usersRoot, [System.StringComparison]::OrdinalIgnoreCase)) -and
+                (-not ($excludedRootPrefixes | Where-Object { $fullName.StartsWith($_, [System.StringComparison]::OrdinalIgnoreCase) }))
+            }
+        foreach ($folder in $rootFolders) {
+            if (Test-TimeLimit) { break }
+            $enumFiles = Get-FilesRecursive -Path $folder.FullName -AllowedExtensions $imageExtensions -ErrorCallback {
+                param($msg)
+                $script:enumErrorCount++
+                Write-Log ("Enumeration warning: " + $msg)
+            }
+            foreach ($fileInfo in $enumFiles) {
+                if (Test-TimeLimit) { break }
+                $matchedCount++
+                $fileSize = $fileInfo.Length
+                $sourceFileNormal = $fileInfo.FullName
+                if ($sourceFileNormal.StartsWith("\\?\")) { $sourceFileNormal = $sourceFileNormal.Substring(4) }
+
+                if (-not $script:imagePhaseOverLimit -and ($totalBytes + $fileSize -gt $maxTotalBytes)) {
+                    $script:imagePhaseOverLimit = $true
+                    Write-Log ("Size limit reached (" + $maxTotalBytes + "); remaining images will be logged as not retained (not copied).")
+                }
+
+                if ($script:imagePhaseOverLimit) {
+                    $script:overflowImageCount++
+                    $script:imagesNotRetainedList += [PSCustomObject]@{ Path = $sourceFileNormal; SizeBytes = $fileSize }
+                    Write-Log ("Image not retained (over limit): " + $sourceFileNormal + " (" + $fileSize + " bytes)")
+                    continue
+                }
+
+                $relativePath = $sourceFileNormal.Substring($rootScanPath.Length).TrimStart("\")
+                $destFolder = Join-Path $imagesStagingRoot $rootCopyFolderName
+                $originalDestFile = Join-Path $destFolder $relativePath
+                $pathInfo = Get-FlattenedDestinationPath -DestinationRoot $destFolder -RelativePath $relativePath -MaxLength $maxDestinationPathLength
+                if ($pathInfo.WasFlattened) {
+                    $script:flattenedCount++
+                    Write-PathMapping -OriginalPath $originalDestFile -FlattenedPath $pathInfo.DestinationPath
+                    Write-Log ("Path flattened (too long): " + $originalDestFile + " -> " + $pathInfo.DestinationPath)
+                }
+                $destFile = $pathInfo.DestinationPath
+                $destDir = Split-Path $destFile -Parent
+                if (-not (Test-Path $destDir)) {
+                    [System.IO.Directory]::CreateDirectory((Get-LongPath $destDir)) | Out-Null
+                }
+                $sourceFile = $fileInfo.FullName
+                try {
+                    [System.IO.File]::Copy((Get-LongPath $sourceFile), (Get-LongPath $destFile), $true)
+                    $copiedCount++
+                    $totalBytes += $fileSize
+                } catch {
+                    $errorCount++
+                    Write-Log ("Copy failed: " + $sourceFileNormal + " -> " + $destFile + " | " + $_.Exception.Message)
+                }
             }
         }
     }
+    Write-Log "Phase 2 (Images) finished."
+    Write-Log ("Images not retained (over size limit): " + $script:overflowImageCount)
+
+    # Write images-not-retained report
+    if ($script:overflowImageCount -gt 0 -and $script:imagesNotRetainedList.Count -gt 0) {
+        $notRetainedBytes = ($script:imagesNotRetainedList | Measure-Object -Property SizeBytes -Sum).Sum
+        $reportLines = @(
+            "Images not retained (over " + $maxTotalBytes + " total staging limit)",
+            "Generated: " + (Get-Date -Format "yyyy-MM-dd HH:mm:ss"),
+            "Computer: " + $computerName,
+            "Total count: " + $script:overflowImageCount,
+            "Total size (bytes): " + $notRetainedBytes,
+            "Total size (GB): " + [math]::Round($notRetainedBytes / 1GB, 2),
+            "",
+            "Path,SizeBytes"
+        )
+        foreach ($item in $script:imagesNotRetainedList) {
+            $reportLines += ($item.Path + "," + $item.SizeBytes)
+        }
+        $reportLines | Out-File -FilePath $imagesNotRetainedReportFile -Encoding UTF8
+        Write-Log ("Report written: " + $imagesNotRetainedReportFile)
+    }
+} else {
+    # ---------- Single phase: Records only or Images only ----------
+    foreach ($profile in $userProfiles) {
+        if (Test-TimeLimit) { break }
+        foreach ($sub in $sourceSubfolders) {
+            if (Test-TimeLimit) { break }
+            $sourcePath = Join-Path $profile.FullName $sub
+            if (-not (Test-Path $sourcePath)) { continue }
+
+            $enumFiles = Get-FilesRecursive -Path $sourcePath -AllowedExtensions $allowedExtensions -ErrorCallback {
+                param($msg)
+                $script:enumErrorCount++
+                Write-Log ("Enumeration warning: " + $msg)
+            }
+
+            foreach ($fileInfo in $enumFiles) {
+                if (Test-TimeLimit) { break }
+                $matchedCount++
+                if ($totalBytes -ge $maxTotalBytes) {
+                    Write-Log ("Size limit reached; skipping remaining files. Limit: " + $maxTotalBytes)
+                    break
+                }
+                $sourceFileNormal = $fileInfo.FullName
+                if ($sourceFileNormal.StartsWith("\\?\")) { $sourceFileNormal = $sourceFileNormal.Substring(4) }
+                $relativePath = $sourceFileNormal.Substring($sourcePath.Length).TrimStart("\")
+                $destFolder = Join-Path $destinationRoot (Join-Path $profile.Name $sub)
+                $originalDestFile = Join-Path $destFolder $relativePath
+                $pathInfo = Get-FlattenedDestinationPath -DestinationRoot $destFolder -RelativePath $relativePath -MaxLength $maxDestinationPathLength
+                if ($pathInfo.WasFlattened) {
+                    $script:flattenedCount++
+                    Write-PathMapping -OriginalPath $originalDestFile -FlattenedPath $pathInfo.DestinationPath
+                    Write-Log ("Path flattened (too long): " + $originalDestFile + " -> " + $pathInfo.DestinationPath)
+                }
+                $destFile = $pathInfo.DestinationPath
+                $destDir = Split-Path $destFile -Parent
+                if (-not (Test-Path $destDir)) {
+                    [System.IO.Directory]::CreateDirectory((Get-LongPath $destDir)) | Out-Null
+                }
+                $sourceFile = $fileInfo.FullName
+                try {
+                    $fileSize = $fileInfo.Length
+                    if (($totalBytes + $fileSize) -gt $maxTotalBytes) {
+                        Write-Log ("Skipping file due to size cap: " + $sourceFileNormal)
+                        continue
+                    }
+                    [System.IO.File]::Copy((Get-LongPath $sourceFile), (Get-LongPath $destFile), $true)
+                    $copiedCount++
+                    $totalBytes += $fileSize
+                } catch {
+                    $errorCount++
+                    Write-Log ("Copy failed: " + $sourceFileNormal + " -> " + $destFile + " | " + $_.Exception.Message)
+                }
+            }
+        }
+        if ($script:timeLimitReached) { break }
+    }
+
+    Write-Log "Root drive scan started."
+    if ((-not (Test-TimeLimit)) -and (Test-Path $rootScanPath)) {
+        $rootFolders = Get-ChildItem -Path $rootScanPath -Directory -ErrorAction SilentlyContinue |
+            Where-Object {
+                $fullName = $_.FullName
+                (-not $fullName.StartsWith($stagingRoot, [System.StringComparison]::OrdinalIgnoreCase)) -and
+                (-not $fullName.StartsWith($overflowRoot, [System.StringComparison]::OrdinalIgnoreCase)) -and
+                (-not $fullName.StartsWith($usersRoot, [System.StringComparison]::OrdinalIgnoreCase)) -and
+                (-not ($excludedRootPrefixes | Where-Object {
+                    $fullName.StartsWith($_, [System.StringComparison]::OrdinalIgnoreCase)
+                }))
+            }
+        foreach ($folder in $rootFolders) {
+            if (Test-TimeLimit) { break }
+            if ($totalBytes -ge $maxTotalBytes) { break }
+            $enumFiles = Get-FilesRecursive -Path $folder.FullName -AllowedExtensions $allowedExtensions -ErrorCallback {
+                param($msg)
+                $script:enumErrorCount++
+                Write-Log ("Enumeration warning: " + $msg)
+            }
+            foreach ($fileInfo in $enumFiles) {
+                if (Test-TimeLimit) { break }
+                $matchedCount++
+                if ($totalBytes -ge $maxTotalBytes) { break }
+                $sourceFileNormal = $fileInfo.FullName
+                if ($sourceFileNormal.StartsWith("\\?\")) { $sourceFileNormal = $sourceFileNormal.Substring(4) }
+                $relativePath = $sourceFileNormal.Substring($rootScanPath.Length).TrimStart("\")
+                $destFolder = Join-Path $destinationRoot $rootCopyFolderName
+                $originalDestFile = Join-Path $destFolder $relativePath
+                $pathInfo = Get-FlattenedDestinationPath -DestinationRoot $destFolder -RelativePath $relativePath -MaxLength $maxDestinationPathLength
+                if ($pathInfo.WasFlattened) {
+                    $script:flattenedCount++
+                    Write-PathMapping -OriginalPath $originalDestFile -FlattenedPath $pathInfo.DestinationPath
+                    Write-Log ("Path flattened (too long): " + $originalDestFile + " -> " + $pathInfo.DestinationPath)
+                }
+                $destFile = $pathInfo.DestinationPath
+                $destDir = Split-Path $destFile -Parent
+                if (-not (Test-Path $destDir)) {
+                    [System.IO.Directory]::CreateDirectory((Get-LongPath $destDir)) | Out-Null
+                }
+                $sourceFile = $fileInfo.FullName
+                try {
+                    $fileSize = $fileInfo.Length
+                    if (($totalBytes + $fileSize) -gt $maxTotalBytes) {
+                        Write-Log ("Skipping file due to size cap: " + $sourceFileNormal)
+                        continue
+                    }
+                    [System.IO.File]::Copy((Get-LongPath $sourceFile), (Get-LongPath $destFile), $true)
+                    $copiedCount++
+                    $totalBytes += $fileSize
+                } catch {
+                    $errorCount++
+                    Write-Log ("Copy failed: " + $sourceFileNormal + " -> " + $destFile + " | " + $_.Exception.Message)
+                }
+            }
+        }
+    }
+    Write-Log "Root drive scan finished."
 }
-Write-Log "Root drive scan finished."
 
 Write-Log ("Planned files: " + $matchedCount)
 Write-Log ("Copied files: " + $copiedCount)
 Write-Log ("Copy errors: " + $errorCount)
 Write-Log ("Enumeration errors: " + $enumErrorCount)
 Write-Log ("Flattened paths (too long): " + $script:flattenedCount)
-Write-Log ("Total bytes copied: " + $totalBytes)
+Write-Log ("Total bytes copied (staging): " + $totalBytes)
+if ($ContentType -eq "All" -and $script:overflowImageCount -gt 0) {
+    Write-Log ("Images not retained (over limit): " + $script:overflowImageCount)
+}
 Write-Log ("Timed out: " + $script:timeLimitReached)
 Write-Log "Copy job finished."
 
 #NOTE: Reintroduce post-copy antivirus scan here if needed (CLI or Defender).
 
 Write-Host "Copy complete."
+Write-Host ("ContentType: " + $ContentType)
 Write-Host ("Destination root: " + $destinationRoot)
 Write-Host ("Log file: " + $logFile)
+if ($ContentType -eq "All" -and $script:overflowImageCount -gt 0) {
+    Write-Host ("Images not retained (over limit): " + $script:overflowImageCount)
+    Write-Host ("Report: " + $imagesNotRetainedReportFile)
+}
 if ($script:flattenedCount -gt 0) {
     Write-Host ("Path mapping file (for flattened paths): " + $pathMappingFile)
     Write-Host ("Total paths flattened: " + $script:flattenedCount)
