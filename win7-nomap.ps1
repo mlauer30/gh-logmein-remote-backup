@@ -1,12 +1,19 @@
-# RUN COMMAND in LogMeIn Central: 
-# To refer to an uploaded file, copy its name (including extension) into your script. To include the file's path in your script, use the environment variable %central_FilePath%
-#For example: Copy-Item filename.png C:\Destination
+# RUN COMMAND in LogMeIn Central (PowerShell 2.0 compatible).
+# Strategy: Records first, then Images. 30GB limit. Images over limit are logged and reported (not copied).
+# No PcDetails.json; destination is C:\Staging_Logmein_central\<COMPUTERNAME>.
 
-Set-StrictMode -Version Latest
+param(
+    [string]$ContentType = "All"
+)
+
+# PS2: -Version 2; avoid Latest
+if ($PSVersionTable.PSVersion.Major -ge 2) {
+    Set-StrictMode -Version 2
+}
 $ErrorActionPreference = "Stop"
 
 $stagingRoot = "C:\Staging_Logmein_central"
-$maxTotalBytes = 60GB
+$maxTotalBytes = 30GB
 $maxRunMinutes = 30
 
 if (-not $stagingRoot) {
@@ -24,62 +31,69 @@ if (-not $computerName) {
     exit 1
 }
 
-# Dump allowed file types directly under staging\<COMPUTERNAME>
-$destinationRoot = Join-Path $stagingRoot $computerName
-if (-not $destinationRoot) {
-    Write-Host "Destination root is empty."
+# Destination: staging\<COMPUTERNAME> (no PcDetails mapping)
+$destinationBase = Join-Path $stagingRoot $computerName
+if (-not $destinationBase) {
+    Write-Host "Destination base is empty."
     exit 1
 }
 
-$allowedExtensions = @(
-    ".jpg", ".jpeg", ".png", ".gif", ".bmp", ".tif", ".tiff", ".webp", ".heic", ".heif", ".raw", ".svg",
+# Validate ContentType (PS2 has no ValidateSet)
+if ($ContentType -ne "Records" -and $ContentType -ne "Images" -and $ContentType -ne "All") {
+    $ContentType = "All"
+}
+
+# Records vs Images: same strategy as stage-filter-copy.ps1
+$recordExtensions = @(
     ".pdf",
     ".doc", ".docx", ".dot", ".dotx",
     ".xls", ".xlsx", ".xlt", ".xltx", ".csv",
     ".ppt", ".pptx", ".pot", ".potx",
-    ".rtf",
-    ".txt",
-    ".md",
-    ".one", ".onepkg",
-    ".vsd", ".vsdx",
+    ".rtf", ".txt", ".md",
+    ".one", ".onepkg", ".vsd", ".vsdx",
     ".zip"
 )
-# Not including OneDrive or Downloads
-# =======
+$imageExtensions = @(
+    ".jpg", ".jpeg", ".png", ".gif", ".bmp", ".tif", ".tiff", ".webp", ".heic", ".heif", ".raw", ".svg"
+)
+$allowedExtensions = $recordExtensions + $imageExtensions
+if ($ContentType -eq "Records") { $allowedExtensions = $recordExtensions }
+if ($ContentType -eq "Images")  { $allowedExtensions = $imageExtensions  }
+
 $sourceSubfolders = @("Desktop", "Documents", "Pictures")
 $usersRoot = "C:\Users"
 $excludedUsers = @("Default", "Default User", "All Users", "DefaultAppPool", "WDAGUtilityAccount", "LogMeInRemoteUser")
 $rootScanPath = "C:\"
 $rootCopyFolderName = "_RootDrive"
 $excludedRootPrefixes = @(
-    "C:\Apps",
-    "C:\Dell",
-    "C:\Drivers",
-    "C:\HP",
-    "C:\inetpub",
-    "C:\LocalStorage",
-    "C:\SoftPaqDownloadDirectory",
-    "C:\SWSETUP",
-    "C:\Windows",
-    "C:\Windows.old",
-    "C:\Program Files",
-    "C:\Program Files (x86)",
-    "C:\ProgramData",
-    "C:\Recovery"
+    "C:\Apps", "C:\Dell", "C:\Drivers", "C:\HP", "C:\inetpub",
+    "C:\LocalStorage", "C:\SoftPaqDownloadDirectory", "C:\SWSETUP",
+    "C:\Windows", "C:\Windows.old", "C:\Program Files", "C:\Program Files (x86)",
+    "C:\ProgramData", "C:\Recovery"
 )
 
-if (-not (Test-Path $destinationRoot)) {
+# When All: log under destinationBase; subfolders Records and Images
+$logDestinationRoot = $destinationBase
+if ($ContentType -eq "Records" -or $ContentType -eq "Images") {
+    $destinationRoot = Join-Path $destinationBase $ContentType
+} else {
+    $destinationRoot = $destinationBase
+}
+
+if (-not (Test-Path $logDestinationRoot)) {
+    New-Item -Path $logDestinationRoot -ItemType Directory -Force | Out-Null
+}
+if ($ContentType -ne "All" -and -not (Test-Path $destinationRoot)) {
     New-Item -Path $destinationRoot -ItemType Directory -Force | Out-Null
 }
 
 $timestamp = Get-Date -Format "yyyyMMdd-HHmmss"
-$logFile = Join-Path $destinationRoot ("copy-log-" + $timestamp + ".txt")
-if (-not $logFile) {
-    Write-Host "Log file path is empty."
-    exit 1
-}
+$logFile = Join-Path $logDestinationRoot ("copy-log-" + $timestamp + ".txt")
+$imagesNotRetainedReportFile = Join-Path $logDestinationRoot ("images-not-retained-" + $timestamp + ".txt")
+$script:imagesNotRetainedList = @()
+
 function Write-Log {
-    param([Parameter(Mandatory = $true)][string]$Message)
+    param([string]$Message)
     $line = "{0} {1}" -f (Get-Date -Format "yyyy-MM-dd HH:mm:ss"), $Message
     Add-Content -Path $logFile -Value $line
 }
@@ -98,10 +112,7 @@ function Test-TimeLimit {
     return $false
 }
 
-Write-Log "Copy job started."
-Write-Log ("ComputerName: " + $computerName)
-Write-Log ("DestinationRoot: " + $destinationRoot)
-
+# PS2: Get-ChildItem -Recurse; filter by container for dirs
 $userProfiles = Get-ChildItem -Path $usersRoot -ErrorAction SilentlyContinue |
     Where-Object { $_.PSIsContainer } |
     Where-Object {
@@ -113,123 +124,357 @@ $matchedCount = 0
 $copiedCount = 0
 $errorCount = 0
 $totalBytes = 0
+$script:overflowImageCount = 0
 
-foreach ($profile in $userProfiles) {
-    if (Test-TimeLimit) { break }
-    foreach ($sub in $sourceSubfolders) {
+Write-Log "Copy job started."
+Write-Log ("ContentType: " + $ContentType)
+Write-Log ("ComputerName: " + $computerName)
+Write-Log ("DestinationRoot: " + $destinationRoot)
+if ($ContentType -eq "All") {
+    Write-Log ("Images over " + $maxTotalBytes + " will be logged and reported (not copied).")
+}
+
+if ($ContentType -eq "All") {
+    # ---------- Phase 1: Records first (up to 30GB) ----------
+    $phase1DestRoot = Join-Path $destinationBase "Records"
+    if (-not (Test-Path $phase1DestRoot)) {
+        New-Item -Path $phase1DestRoot -ItemType Directory -Force | Out-Null
+    }
+    Write-Log "Phase 1 (Records) started. Destination: $phase1DestRoot"
+
+    foreach ($profile in $userProfiles) {
         if (Test-TimeLimit) { break }
-        $sourcePath = Join-Path $profile.FullName $sub
-        if (-not (Test-Path $sourcePath)) { continue }
+        foreach ($sub in $sourceSubfolders) {
+            if (Test-TimeLimit) { break }
+            $sourcePath = Join-Path $profile.FullName $sub
+            if (-not (Test-Path $sourcePath)) { continue }
 
-        Get-ChildItem -Path $sourcePath -Recurse -ErrorAction SilentlyContinue |
-            Where-Object { -not $_.PSIsContainer } |
+            Get-ChildItem -Path $sourcePath -Recurse -ErrorAction SilentlyContinue |
+                Where-Object { -not $_.PSIsContainer } |
+                Where-Object {
+                    $ext = $_.Extension.ToLower()
+                    $recordExtensions -contains $ext
+                } |
+                ForEach-Object {
+                    if (Test-TimeLimit) { break }
+                    $matchedCount++
+                    if ($totalBytes -ge $maxTotalBytes) { return }
+                    $relativePath = $_.FullName.Substring($sourcePath.Length).TrimStart("\")
+                    $destFolder = Join-Path $phase1DestRoot (Join-Path $profile.Name $sub)
+                    $destFile = Join-Path $destFolder $relativePath
+                    $destDir = Split-Path $destFile -Parent
+                    if (-not (Test-Path $destDir)) {
+                        New-Item -Path $destDir -ItemType Directory -Force | Out-Null
+                    }
+                    $sourceFile = $_.FullName
+                    try {
+                        $fileSize = $_.Length
+                        if (($totalBytes + $fileSize) -gt $maxTotalBytes) {
+                            Write-Log ("Skipping file due to size cap: " + $sourceFile)
+                            return
+                        }
+                        Copy-Item -Path $sourceFile -Destination $destFile -Force -ErrorAction Stop
+                        $copiedCount++
+                        $totalBytes += $fileSize
+                    } catch {
+                        $errorCount++
+                        Write-Log ("Copy failed: " + $sourceFile + " -> " + $destFile + " | " + $_.Exception.Message)
+                    }
+                }
+        }
+        if ($script:timeLimitReached) { break }
+    }
+
+    Write-Log "Root drive scan started (Phase 1 - Records)."
+    if ((-not (Test-TimeLimit)) -and (Test-Path $rootScanPath)) {
+        $rootFolders = Get-ChildItem -Path $rootScanPath -ErrorAction SilentlyContinue |
+            Where-Object { $_.PSIsContainer } |
             Where-Object {
-                $ext = $_.Extension.ToLowerInvariant()
-                $allowedExtensions -contains $ext
-            } |
-            ForEach-Object {
-                if (Test-TimeLimit) { break }
-                $matchedCount++
-                if ($totalBytes -ge $maxTotalBytes) {
-                    Write-Log ("Size limit reached; skipping remaining files. Limit: " + $maxTotalBytes)
-                    break
-                }
-                $relativePath = $_.FullName.Substring($sourcePath.Length).TrimStart("\")
-                $destFolder = Join-Path $destinationRoot (Join-Path $profile.Name $sub)
-                $destFile = Join-Path $destFolder $relativePath
-
-                $destDir = Split-Path $destFile -Parent
-                if (-not (Test-Path $destDir)) {
-                    New-Item -Path $destDir -ItemType Directory -Force | Out-Null
-                }
-
-                $sourceFile = $_.FullName
-                try {
-                    $fileSize = $_.Length
-                    if (($totalBytes + $fileSize) -gt $maxTotalBytes) {
-                        Write-Log ("Skipping file due to size cap: " + $sourceFile)
-                        return
-                    }
-                    Copy-Item -Path $sourceFile -Destination $destFile -Force -ErrorAction Stop
-                    $copiedCount++
-                    $totalBytes += $fileSize
-                } catch {
-                    $errorCount++
-                    Write-Log ("Copy failed: " + $sourceFile + " -> " + $destFile + " | " + $_.Exception.Message)
-                }
+                $fullName = $_.FullName
+                (-not $fullName.StartsWith($stagingRoot, [System.StringComparison]::OrdinalIgnoreCase)) -and
+                (-not $fullName.StartsWith($usersRoot, [System.StringComparison]::OrdinalIgnoreCase)) -and
+                (-not ($excludedRootPrefixes | Where-Object { $fullName.StartsWith($_, [System.StringComparison]::OrdinalIgnoreCase) }))
             }
-    }
-    if ($script:timeLimitReached) { break }
-}
-
-Write-Log "Root drive scan started."
-if ((-not (Test-TimeLimit)) -and (Test-Path $rootScanPath)) {
-    $rootFolders = Get-ChildItem -Path $rootScanPath -ErrorAction SilentlyContinue |
-        Where-Object { $_.PSIsContainer } |
-        Where-Object {
-            $fullName = $_.FullName
-            (-not $fullName.StartsWith($stagingRoot, [System.StringComparison]::OrdinalIgnoreCase)) -and
-            (-not $fullName.StartsWith($usersRoot, [System.StringComparison]::OrdinalIgnoreCase)) -and
-            (-not ($excludedRootPrefixes | Where-Object {
-                $fullName.StartsWith($_, [System.StringComparison]::OrdinalIgnoreCase)
-            }))
+        foreach ($folder in $rootFolders) {
+            if (Test-TimeLimit) { break }
+            if ($totalBytes -ge $maxTotalBytes) { break }
+            Get-ChildItem -Path $folder.FullName -Recurse -ErrorAction SilentlyContinue |
+                Where-Object { -not $_.PSIsContainer } |
+                Where-Object { $recordExtensions -contains $_.Extension.ToLower() } |
+                ForEach-Object {
+                    if (Test-TimeLimit) { break }
+                    $matchedCount++
+                    if ($totalBytes -ge $maxTotalBytes) { return }
+                    $relativePath = $_.FullName.Substring($rootScanPath.Length).TrimStart("\")
+                    $destFolder = Join-Path $phase1DestRoot $rootCopyFolderName
+                    $destFile = Join-Path $destFolder $relativePath
+                    $destDir = Split-Path $destFile -Parent
+                    if (-not (Test-Path $destDir)) {
+                        New-Item -Path $destDir -ItemType Directory -Force | Out-Null
+                    }
+                    $sourceFile = $_.FullName
+                    try {
+                        $fileSize = $_.Length
+                        if (($totalBytes + $fileSize) -gt $maxTotalBytes) {
+                            Write-Log ("Skipping file due to size cap: " + $sourceFile)
+                            return
+                        }
+                        Copy-Item -Path $sourceFile -Destination $destFile -Force -ErrorAction Stop
+                        $copiedCount++
+                        $totalBytes += $fileSize
+                    } catch {
+                        $errorCount++
+                        Write-Log ("Copy failed: " + $sourceFile + " -> " + $destFile + " | " + $_.Exception.Message)
+                    }
+                }
         }
+    }
+    Write-Log "Phase 1 (Records) finished."
 
-    foreach ($folder in $rootFolders) {
+    # ---------- Phase 2: Images; over limit = log + report only ----------
+    $imagesStagingRoot = Join-Path $destinationBase "Images"
+    if (-not (Test-Path $imagesStagingRoot)) {
+        New-Item -Path $imagesStagingRoot -ItemType Directory -Force | Out-Null
+    }
+    $script:imagePhaseOverLimit = $false
+    Write-Log "Phase 2 (Images) started. Images over limit will be logged and reported (not copied)."
+
+    foreach ($profile in $userProfiles) {
         if (Test-TimeLimit) { break }
-        if ($totalBytes -ge $maxTotalBytes) {
-            Write-Log ("Size limit reached; skipping remaining root folders. Limit: " + $maxTotalBytes)
-            break
-        }
+        foreach ($sub in $sourceSubfolders) {
+            if (Test-TimeLimit) { break }
+            $sourcePath = Join-Path $profile.FullName $sub
+            if (-not (Test-Path $sourcePath)) { continue }
 
-        Get-ChildItem -Path $folder.FullName -Recurse -ErrorAction SilentlyContinue |
-            Where-Object { -not $_.PSIsContainer } |
-            Where-Object { $allowedExtensions -contains $_.Extension.ToLowerInvariant() } |
-            ForEach-Object {
-                if (Test-TimeLimit) { break }
-                $matchedCount++
-                if ($totalBytes -ge $maxTotalBytes) {
-                    Write-Log ("Size limit reached; skipping remaining root files. Limit: " + $maxTotalBytes)
-                    break
-                }
-                $relativePath = $_.FullName.Substring($rootScanPath.Length).TrimStart("\")
-                $destFolder = Join-Path $destinationRoot $rootCopyFolderName
-                $destFile = Join-Path $destFolder $relativePath
-
-                $destDir = Split-Path $destFile -Parent
-                if (-not (Test-Path $destDir)) {
-                    New-Item -Path $destDir -ItemType Directory -Force | Out-Null
-                }
-
-                $sourceFile = $_.FullName
-                try {
+            Get-ChildItem -Path $sourcePath -Recurse -ErrorAction SilentlyContinue |
+                Where-Object { -not $_.PSIsContainer } |
+                Where-Object { $imageExtensions -contains $_.Extension.ToLower() } |
+                ForEach-Object {
+                    if (Test-TimeLimit) { break }
+                    $matchedCount++
                     $fileSize = $_.Length
-                    if (($totalBytes + $fileSize) -gt $maxTotalBytes) {
-                        Write-Log ("Skipping file due to size cap: " + $sourceFile)
+                    $sourceFile = $_.FullName
+
+                    if (-not $script:imagePhaseOverLimit -and ($totalBytes + $fileSize -gt $maxTotalBytes)) {
+                        $script:imagePhaseOverLimit = $true
+                        Write-Log ("Size limit reached (" + $maxTotalBytes + "); remaining images will be logged as not retained (not copied).")
+                    }
+
+                    if ($script:imagePhaseOverLimit) {
+                        $script:overflowImageCount++
+                        $script:imagesNotRetainedList += ($sourceFile + "|" + $fileSize)
+                        Write-Log ("Image not retained (over limit): " + $sourceFile + " (" + $fileSize + " bytes)")
                         return
                     }
-                    Copy-Item -Path $sourceFile -Destination $destFile -Force -ErrorAction Stop
-                    $copiedCount++
-                    $totalBytes += $fileSize
-                } catch {
-                    $errorCount++
-                    Write-Log ("Copy failed: " + $sourceFile + " -> " + $destFile + " | " + $_.Exception.Message)
+
+                    $relativePath = $_.FullName.Substring($sourcePath.Length).TrimStart("\")
+                    $destFolder = Join-Path $imagesStagingRoot (Join-Path $profile.Name $sub)
+                    $destFile = Join-Path $destFolder $relativePath
+                    $destDir = Split-Path $destFile -Parent
+                    if (-not (Test-Path $destDir)) {
+                        New-Item -Path $destDir -ItemType Directory -Force | Out-Null
+                    }
+                    try {
+                        Copy-Item -Path $sourceFile -Destination $destFile -Force -ErrorAction Stop
+                        $copiedCount++
+                        $totalBytes += $fileSize
+                    } catch {
+                        $errorCount++
+                        Write-Log ("Copy failed: " + $sourceFile + " -> " + $destFile + " | " + $_.Exception.Message)
+                    }
                 }
-            }
+        }
+        if ($script:timeLimitReached) { break }
     }
+
+    Write-Log "Root drive scan started (Phase 2 - Images)."
+    if ((-not (Test-TimeLimit)) -and (Test-Path $rootScanPath)) {
+        $rootFolders = Get-ChildItem -Path $rootScanPath -ErrorAction SilentlyContinue |
+            Where-Object { $_.PSIsContainer } |
+            Where-Object {
+                $fullName = $_.FullName
+                (-not $fullName.StartsWith($stagingRoot, [System.StringComparison]::OrdinalIgnoreCase)) -and
+                (-not $fullName.StartsWith($usersRoot, [System.StringComparison]::OrdinalIgnoreCase)) -and
+                (-not ($excludedRootPrefixes | Where-Object { $fullName.StartsWith($_, [System.StringComparison]::OrdinalIgnoreCase) }))
+            }
+        foreach ($folder in $rootFolders) {
+            if (Test-TimeLimit) { break }
+            Get-ChildItem -Path $folder.FullName -Recurse -ErrorAction SilentlyContinue |
+                Where-Object { -not $_.PSIsContainer } |
+                Where-Object { $imageExtensions -contains $_.Extension.ToLower() } |
+                ForEach-Object {
+                    if (Test-TimeLimit) { break }
+                    $matchedCount++
+                    $fileSize = $_.Length
+                    $sourceFile = $_.FullName
+
+                    if (-not $script:imagePhaseOverLimit -and ($totalBytes + $fileSize -gt $maxTotalBytes)) {
+                        $script:imagePhaseOverLimit = $true
+                        Write-Log ("Size limit reached (" + $maxTotalBytes + "); remaining images will be logged as not retained (not copied).")
+                    }
+
+                    if ($script:imagePhaseOverLimit) {
+                        $script:overflowImageCount++
+                        $script:imagesNotRetainedList += ($sourceFile + "|" + $fileSize)
+                        Write-Log ("Image not retained (over limit): " + $sourceFile + " (" + $fileSize + " bytes)")
+                        return
+                    }
+
+                    $relativePath = $_.FullName.Substring($rootScanPath.Length).TrimStart("\")
+                    $destFolder = Join-Path $imagesStagingRoot $rootCopyFolderName
+                    $destFile = Join-Path $destFolder $relativePath
+                    $destDir = Split-Path $destFile -Parent
+                    if (-not (Test-Path $destDir)) {
+                        New-Item -Path $destDir -ItemType Directory -Force | Out-Null
+                    }
+                    try {
+                        Copy-Item -Path $sourceFile -Destination $destFile -Force -ErrorAction Stop
+                        $copiedCount++
+                        $totalBytes += $fileSize
+                    } catch {
+                        $errorCount++
+                        Write-Log ("Copy failed: " + $sourceFile + " -> " + $destFile + " | " + $_.Exception.Message)
+                    }
+                }
+        }
+    }
+    Write-Log "Phase 2 (Images) finished."
+    Write-Log ("Images not retained (over size limit): " + $script:overflowImageCount)
+
+    # Write images-not-retained report (PS2: no Measure-Object -Sum on property; sum manually)
+    if ($script:overflowImageCount -gt 0 -and $script:imagesNotRetainedList.Count -gt 0) {
+        $notRetainedBytes = 0
+        foreach ($entry in $script:imagesNotRetainedList) {
+            $parts = $entry -split "\|", 2
+            if ($parts.Length -eq 2) { $notRetainedBytes += [long]$parts[1] }
+        }
+        $reportLines = @(
+            "Images not retained (over " + $maxTotalBytes + " total staging limit)",
+            "Generated: " + (Get-Date -Format "yyyy-MM-dd HH:mm:ss"),
+            "Computer: " + $computerName,
+            "Total count: " + $script:overflowImageCount,
+            "Total size (bytes): " + $notRetainedBytes,
+            "Total size (GB): " + [math]::Round($notRetainedBytes / 1GB, 2),
+            "",
+            "Path,SizeBytes"
+        )
+        foreach ($entry in $script:imagesNotRetainedList) {
+            $p = $entry -replace "\|", ","
+            $reportLines += $p
+        }
+        $reportLines | Out-File -FilePath $imagesNotRetainedReportFile -Encoding UTF8
+        Write-Log ("Report written: " + $imagesNotRetainedReportFile)
+    }
+} else {
+    # ---------- Single phase: Records only or Images only ----------
+    foreach ($profile in $userProfiles) {
+        if (Test-TimeLimit) { break }
+        foreach ($sub in $sourceSubfolders) {
+            if (Test-TimeLimit) { break }
+            $sourcePath = Join-Path $profile.FullName $sub
+            if (-not (Test-Path $sourcePath)) { continue }
+
+            Get-ChildItem -Path $sourcePath -Recurse -ErrorAction SilentlyContinue |
+                Where-Object { -not $_.PSIsContainer } |
+                Where-Object { $allowedExtensions -contains $_.Extension.ToLower() } |
+                ForEach-Object {
+                    if (Test-TimeLimit) { break }
+                    $matchedCount++
+                    if ($totalBytes -ge $maxTotalBytes) {
+                        Write-Log ("Size limit reached; skipping remaining files. Limit: " + $maxTotalBytes)
+                        return
+                    }
+                    $relativePath = $_.FullName.Substring($sourcePath.Length).TrimStart("\")
+                    $destFolder = Join-Path $destinationRoot (Join-Path $profile.Name $sub)
+                    $destFile = Join-Path $destFolder $relativePath
+                    $destDir = Split-Path $destFile -Parent
+                    if (-not (Test-Path $destDir)) {
+                        New-Item -Path $destDir -ItemType Directory -Force | Out-Null
+                    }
+                    $sourceFile = $_.FullName
+                    try {
+                        $fileSize = $_.Length
+                        if (($totalBytes + $fileSize) -gt $maxTotalBytes) {
+                            Write-Log ("Skipping file due to size cap: " + $sourceFile)
+                            return
+                        }
+                        Copy-Item -Path $sourceFile -Destination $destFile -Force -ErrorAction Stop
+                        $copiedCount++
+                        $totalBytes += $fileSize
+                    } catch {
+                        $errorCount++
+                        Write-Log ("Copy failed: " + $sourceFile + " -> " + $destFile + " | " + $_.Exception.Message)
+                    }
+                }
+        }
+        if ($script:timeLimitReached) { break }
+    }
+
+    Write-Log "Root drive scan started."
+    if ((-not (Test-TimeLimit)) -and (Test-Path $rootScanPath)) {
+        $rootFolders = Get-ChildItem -Path $rootScanPath -ErrorAction SilentlyContinue |
+            Where-Object { $_.PSIsContainer } |
+            Where-Object {
+                $fullName = $_.FullName
+                (-not $fullName.StartsWith($stagingRoot, [System.StringComparison]::OrdinalIgnoreCase)) -and
+                (-not $fullName.StartsWith($usersRoot, [System.StringComparison]::OrdinalIgnoreCase)) -and
+                (-not ($excludedRootPrefixes | Where-Object {
+                    $fullName.StartsWith($_, [System.StringComparison]::OrdinalIgnoreCase)
+                }))
+            }
+        foreach ($folder in $rootFolders) {
+            if (Test-TimeLimit) { break }
+            if ($totalBytes -ge $maxTotalBytes) { break }
+            Get-ChildItem -Path $folder.FullName -Recurse -ErrorAction SilentlyContinue |
+                Where-Object { -not $_.PSIsContainer } |
+                Where-Object { $allowedExtensions -contains $_.Extension.ToLower() } |
+                ForEach-Object {
+                    if (Test-TimeLimit) { break }
+                    $matchedCount++
+                    if ($totalBytes -ge $maxTotalBytes) { return }
+                    $relativePath = $_.FullName.Substring($rootScanPath.Length).TrimStart("\")
+                    $destFolder = Join-Path $destinationRoot $rootCopyFolderName
+                    $destFile = Join-Path $destFolder $relativePath
+                    $destDir = Split-Path $destFile -Parent
+                    if (-not (Test-Path $destDir)) {
+                        New-Item -Path $destDir -ItemType Directory -Force | Out-Null
+                    }
+                    $sourceFile = $_.FullName
+                    try {
+                        $fileSize = $_.Length
+                        if (($totalBytes + $fileSize) -gt $maxTotalBytes) {
+                            Write-Log ("Skipping file due to size cap: " + $sourceFile)
+                            return
+                        }
+                        Copy-Item -Path $sourceFile -Destination $destFile -Force -ErrorAction Stop
+                        $copiedCount++
+                        $totalBytes += $fileSize
+                    } catch {
+                        $errorCount++
+                        Write-Log ("Copy failed: " + $sourceFile + " -> " + $destFile + " | " + $_.Exception.Message)
+                    }
+                }
+        }
+    }
+    Write-Log "Root drive scan finished."
 }
-Write-Log "Root drive scan finished."
 
 Write-Log ("Planned files: " + $matchedCount)
 Write-Log ("Copied files: " + $copiedCount)
 Write-Log ("Copy errors: " + $errorCount)
 Write-Log ("Total bytes copied: " + $totalBytes)
 Write-Log ("Timed out: " + $script:timeLimitReached)
+if ($ContentType -eq "All" -and $script:overflowImageCount -gt 0) {
+    Write-Log ("Images not retained (over limit): " + $script:overflowImageCount)
+}
 Write-Log "Copy job finished."
 
-#NOTE: Reintroduce post-copy antivirus scan here if needed (CLI or Defender).
-
 Write-Host "Copy complete."
+Write-Host ("ContentType: " + $ContentType)
 Write-Host ("Destination root: " + $destinationRoot)
 Write-Host ("Log file: " + $logFile)
+if ($ContentType -eq "All" -and $script:overflowImageCount -gt 0) {
+    Write-Host ("Images not retained (over limit): " + $script:overflowImageCount)
+    Write-Host ("Report: " + $imagesNotRetainedReportFile)
+}
 exit 0

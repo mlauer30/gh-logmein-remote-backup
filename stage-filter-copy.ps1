@@ -199,8 +199,6 @@ $maxRunMinutes = 30
 # Maximum destination path length (network shares often have stricter limits than local paths)
 # Set to 200 to leave room for network share UNC paths (e.g., \\server\share\...)
 $maxDestinationPathLength = 200
-# Overflow is on local drive; use longer limit so folder structure is preserved (no flattening)
-$maxDestinationPathLengthOverflow = 400
 
 $pcDetailsMapping = "C:\PcDetails.json"
 
@@ -257,17 +255,8 @@ if (-not $destinationBase) {
     exit 1
 }
 
-# Stage records and images separately: subfolder under archive when ContentType is Records or Images
-$contentSubfolder = switch ($ContentType) {
-    "Records" { "Records" }
-    "Images"  { "Images" }
-    default   { $null }
-}
-$destinationRoot = if ($contentSubfolder) {
-    Join-Path $destinationBase $contentSubfolder
-} else {
-    $destinationBase
-}
+# Single destination tree (no Records/Images subfolders); strategy: records copied first, then images into same tree
+$destinationRoot = $destinationBase
 
 # Extension sets: Records = documents/data; Images = image files
 $recordExtensions = @(
@@ -316,13 +305,9 @@ $excludedRootPrefixes = @(
     "C:\Recovery"
 )
 
-# When ContentType is All, log and path mapping live under destinationBase so both phases use the same log
-$logDestinationRoot = if ($ContentType -eq "All") { $destinationBase } else { $destinationRoot }
+$logDestinationRoot = $destinationBase
 if (-not (Test-Path $logDestinationRoot)) {
     [System.IO.Directory]::CreateDirectory((Get-LongPath $logDestinationRoot)) | Out-Null
-}
-if ($ContentType -ne "All" -and -not (Test-Path $destinationRoot)) {
-    [System.IO.Directory]::CreateDirectory((Get-LongPath $destinationRoot)) | Out-Null
 }
 
 $timestamp = Get-Date -Format "yyyyMMdd-HHmmss"
@@ -388,12 +373,8 @@ $totalBytes = 0
 $script:overflowImageCount = 0
 
 if ($ContentType -eq "All") {
-    # ---------- Phase 1: Records first (to staging, up to 60GB) ----------
-    $phase1DestRoot = Join-Path $destinationBase "Records"
-    if (-not (Test-Path $phase1DestRoot)) {
-        [System.IO.Directory]::CreateDirectory((Get-LongPath $phase1DestRoot)) | Out-Null
-    }
-    Write-Log "Phase 1 (Records) started. Destination: $phase1DestRoot"
+    # ---------- Phase 1: Records first (users + root); same destination tree, no extra folders ----------
+    Write-Log "Phase 1 (Records) started. Destination: $destinationBase"
 
     foreach ($profile in $userProfiles) {
         if (Test-TimeLimit) { break }
@@ -418,7 +399,7 @@ if ($ContentType -eq "All") {
                 $sourceFileNormal = $fileInfo.FullName
                 if ($sourceFileNormal.StartsWith("\\?\")) { $sourceFileNormal = $sourceFileNormal.Substring(4) }
                 $relativePath = $sourceFileNormal.Substring($sourcePath.Length).TrimStart("\")
-                $destFolder = Join-Path $phase1DestRoot (Join-Path $profile.Name $sub)
+                $destFolder = Join-Path $destinationBase (Join-Path $profile.Name $sub)
                 $originalDestFile = Join-Path $destFolder $relativePath
                 $pathInfo = Get-FlattenedDestinationPath -DestinationRoot $destFolder -RelativePath $relativePath -MaxLength $maxDestinationPathLength
                 if ($pathInfo.WasFlattened) {
@@ -475,7 +456,7 @@ if ($ContentType -eq "All") {
                 $sourceFileNormal = $fileInfo.FullName
                 if ($sourceFileNormal.StartsWith("\\?\")) { $sourceFileNormal = $sourceFileNormal.Substring(4) }
                 $relativePath = $sourceFileNormal.Substring($rootScanPath.Length).TrimStart("\")
-                $destFolder = Join-Path $phase1DestRoot $rootCopyFolderName
+                $destFolder = Join-Path $destinationBase $rootCopyFolderName
                 $originalDestFile = Join-Path $destFolder $relativePath
                 $pathInfo = Get-FlattenedDestinationPath -DestinationRoot $destFolder -RelativePath $relativePath -MaxLength $maxDestinationPathLength
                 if ($pathInfo.WasFlattened) {
@@ -507,14 +488,9 @@ if ($ContentType -eq "All") {
     }
     Write-Log "Phase 1 (Records) finished."
 
-    # ---------- Phase 2: Images last; staging until size limit, then log/report only (no copy) ----------
-    # Same folder structure: Username\Desktop|Documents|Pictures\... and _RootDrive\...
-    $imagesStagingRoot = Join-Path $destinationBase "Images"
-    if (-not (Test-Path $imagesStagingRoot)) {
-        [System.IO.Directory]::CreateDirectory((Get-LongPath $imagesStagingRoot)) | Out-Null
-    }
+    # ---------- Phase 2: Images last; same destination tree; over limit = log/report only ----------
     $script:imagePhaseOverLimit = $false
-    Write-Log "Phase 2 (Images) started. Staging: $imagesStagingRoot ; images over limit will be logged and reported (not copied)."
+    Write-Log "Phase 2 (Images) started. Same destination: $destinationBase ; images over limit will be logged and reported (not copied)."
 
     foreach ($profile in $userProfiles) {
         if (Test-TimeLimit) { break }
@@ -549,7 +525,7 @@ if ($ContentType -eq "All") {
                 }
 
                 $relativePath = $sourceFileNormal.Substring($sourcePath.Length).TrimStart("\")
-                $destFolder = Join-Path $imagesStagingRoot (Join-Path $profile.Name $sub)
+                $destFolder = Join-Path $destinationBase (Join-Path $profile.Name $sub)
                 $originalDestFile = Join-Path $destFolder $relativePath
                 $pathInfo = Get-FlattenedDestinationPath -DestinationRoot $destFolder -RelativePath $relativePath -MaxLength $maxDestinationPathLength
                 if ($pathInfo.WasFlattened) {
@@ -613,7 +589,7 @@ if ($ContentType -eq "All") {
                 }
 
                 $relativePath = $sourceFileNormal.Substring($rootScanPath.Length).TrimStart("\")
-                $destFolder = Join-Path $imagesStagingRoot $rootCopyFolderName
+                $destFolder = Join-Path $destinationBase $rootCopyFolderName
                 $originalDestFile = Join-Path $destFolder $relativePath
                 $pathInfo = Get-FlattenedDestinationPath -DestinationRoot $destFolder -RelativePath $relativePath -MaxLength $maxDestinationPathLength
                 if ($pathInfo.WasFlattened) {
