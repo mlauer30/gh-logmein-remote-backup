@@ -17,10 +17,181 @@ function Get-LongPath {
     return $p
 }
 
+# Recursive enumeration that handles long paths and deeply nested directories
+function Get-FilesRecursive {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [string[]]$AllowedExtensions = @(),
+        [scriptblock]$ErrorCallback = $null
+    )
+    $longPath = Get-LongPath $Path
+    $files = @()
+    
+    # Check if directory exists and is accessible
+    try {
+        if (-not [System.IO.Directory]::Exists($longPath)) {
+            return $files
+        }
+    } catch {
+        if ($ErrorCallback) { & $ErrorCallback "Cannot access directory: $Path - $($_.Exception.Message)" }
+        return $files
+    }
+    
+    try {
+        # Get files in current directory
+        foreach ($file in [System.IO.Directory]::EnumerateFiles($longPath)) {
+            try {
+                # Ensure we have a FileInfo with long path support
+                $fileInfo = New-Object System.IO.FileInfo($file)
+                if ($AllowedExtensions.Count -eq 0 -or 
+                    ($fileInfo.Extension -and $AllowedExtensions -contains $fileInfo.Extension.ToLowerInvariant())) {
+                    $files += $fileInfo
+                }
+            } catch {
+                if ($ErrorCallback) { & $ErrorCallback "Failed to process file: $file - $($_.Exception.Message)" }
+            }
+        }
+    } catch {
+        if ($ErrorCallback) { & $ErrorCallback "Failed to enumerate files in: $Path - $($_.Exception.Message)" }
+    }
+    
+    # Recursively process subdirectories
+    try {
+        foreach ($dir in [System.IO.Directory]::EnumerateDirectories($longPath)) {
+            try {
+                $subFiles = Get-FilesRecursive -Path $dir -AllowedExtensions $AllowedExtensions -ErrorCallback $ErrorCallback
+                $files += $subFiles
+            } catch {
+                if ($ErrorCallback) { & $ErrorCallback "Failed to recurse into: $dir - $($_.Exception.Message)" }
+            }
+        }
+    } catch {
+        if ($ErrorCallback) { & $ErrorCallback "Failed to enumerate directories in: $Path - $($_.Exception.Message)" }
+    }
+    
+    return $files
+}
+
+# Flatten destination path if it exceeds maximum length for network shares
+function Get-FlattenedDestinationPath {
+    param(
+        [Parameter(Mandatory = $true)][string]$DestinationRoot,
+        [Parameter(Mandatory = $true)][string]$RelativePath,
+        [Parameter(Mandatory = $true)][int]$MaxLength
+    )
+    
+    $fullPath = Join-Path $DestinationRoot $RelativePath
+    $pathLength = $fullPath.Length
+    
+    if ($pathLength -le $MaxLength) {
+        return @{
+            DestinationPath = $fullPath
+            WasFlattened = $false
+            OriginalPath = $fullPath
+        }
+    }
+    
+    # Path is too long - flatten it
+    # Strategy: Keep base folder structure (user/profile/subfolder) but flatten deep nesting
+    # Use hash of the deep path to create a shorter unique identifier
+    
+    $parts = $RelativePath.Split([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar)
+    $fileName = $parts[-1]
+    $extension = [IO.Path]::GetExtension($fileName)
+    $nameWithoutExt = [IO.Path]::GetFileNameWithoutExtension($fileName)
+    
+    # Keep first 2-3 directory levels, then hash the rest
+    $keepLevels = 2
+    if ($parts.Count -le $keepLevels + 1) {
+        # Not enough levels to flatten meaningfully, just truncate the filename if needed
+        $maxFileNameLength = $MaxLength - $DestinationRoot.Length - 20
+        if ($maxFileNameLength -lt 20) {
+            $maxFileNameLength = 20
+        }
+        if ($fileName.Length -gt $maxFileNameLength) {
+            $truncatedName = $nameWithoutExt.Substring(0, [Math]::Min($nameWithoutExt.Length, $maxFileNameLength - $extension.Length - 10)) + "_" + $nameWithoutExt.GetHashCode().ToString("X8") + $extension
+            $flattenedPath = Join-Path $DestinationRoot $truncatedName
+            return @{
+                DestinationPath = $flattenedPath
+                WasFlattened = $true
+                OriginalPath = $fullPath
+            }
+        } else {
+            # Path is too long but filename is short - likely the destination root is very long
+            # Just put file directly in destination root
+            $flattenedPath = Join-Path $DestinationRoot $fileName
+            return @{
+                DestinationPath = $flattenedPath
+                WasFlattened = $true
+                OriginalPath = $fullPath
+            }
+        }
+    }
+    
+    # Build path with first few levels, then hash the rest
+    $basePath = $DestinationRoot
+    $pathToHash = ""
+    
+    # Keep first keepLevels directories
+    for ($i = 0; $i -lt [Math]::Min($keepLevels, $parts.Count - 1); $i++) {
+        $basePath = Join-Path $basePath $parts[$i]
+    }
+    
+    # Hash the remaining path (excluding filename)
+    if ($parts.Count -gt $keepLevels + 1) {
+        $remainingParts = $parts[$keepLevels..($parts.Count - 2)]
+        $pathToHash = $remainingParts -join "\"
+    }
+    
+    # Create a short hash-based folder name
+    $hashString = ""
+    try {
+        $md5 = [System.Security.Cryptography.MD5]::Create()
+        try {
+            $hash = $md5.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($pathToHash))
+            $hashString = [BitConverter]::ToString($hash).Replace("-", "").Substring(0, 8)
+        } finally {
+            $md5.Dispose()
+        }
+    } catch {
+        # Fallback to simple hash code if MD5 fails
+        $hashString = $pathToHash.GetHashCode().ToString("X8").Substring(0, 8)
+    }
+    
+    if ($pathToHash) {
+        $hashFolder = Join-Path $basePath ("_flat_" + $hashString)
+        $flattenedPath = Join-Path $hashFolder $fileName
+    } else {
+        $flattenedPath = Join-Path $basePath $fileName
+    }
+    
+    # If still too long, truncate filename
+    if ($flattenedPath.Length -gt $MaxLength) {
+        $maxFileNameLength = $MaxLength - (Split-Path $flattenedPath -Parent).Length - 5
+        if ($maxFileNameLength -gt 20) {
+            $truncatedName = $nameWithoutExt.Substring(0, [Math]::Min($nameWithoutExt.Length, $maxFileNameLength - $extension.Length - 10)) + "_" + $nameWithoutExt.GetHashCode().ToString("X8") + $extension
+            $flattenedPath = Join-Path (Split-Path $flattenedPath -Parent) $truncatedName
+        } else {
+            # Last resort: just use hash as filename
+            $hashFileName = $hashString + $extension
+            $flattenedPath = Join-Path (Split-Path $flattenedPath -Parent) $hashFileName
+        }
+    }
+    
+    return @{
+        DestinationPath = $flattenedPath
+        WasFlattened = $true
+        OriginalPath = $fullPath
+    }
+}
+
 $stagingRoot = "C:\Staging_Logmein_central"
 $archiveFolderName = "01_PCARCHIVE"
 $maxTotalBytes = 60GB
 $maxRunMinutes = 30
+# Maximum destination path length (network shares often have stricter limits than local paths)
+# Set to 200 to leave room for network share UNC paths (e.g., \\server\share\...)
+$maxDestinationPathLength = 200
 
 $pcDetailsMapping = "C:\PcDetails.json"
 
@@ -124,10 +295,22 @@ if (-not $logFile) {
     Write-Host "Log file path is empty."
     exit 1
 }
+$pathMappingFile = Join-Path $destinationRoot ("path-mapping-" + $timestamp + ".txt")
+$script:flattenedCount = 0
+
 function Write-Log {
     param([Parameter(Mandatory = $true)][string]$Message)
     $line = "{0} {1}" -f (Get-Date -Format "yyyy-MM-dd HH:mm:ss"), $Message
     Add-Content -Path $logFile -Value $line
+}
+
+function Write-PathMapping {
+    param(
+        [Parameter(Mandatory = $true)][string]$OriginalPath,
+        [Parameter(Mandatory = $true)][string]$FlattenedPath
+    )
+    $line = "{0}|{1}" -f $OriginalPath, $FlattenedPath
+    Add-Content -Path $pathMappingFile -Value $line
 }
 
 $jobStart = Get-Date
@@ -158,6 +341,7 @@ $userProfiles = Get-ChildItem -Path $usersRoot -Directory -ErrorAction SilentlyC
 $matchedCount = 0
 $copiedCount = 0
 $errorCount = 0
+$enumErrorCount = 0
 $totalBytes = 0
 
 foreach ($profile in $userProfiles) {
@@ -167,42 +351,60 @@ foreach ($profile in $userProfiles) {
         $sourcePath = Join-Path $profile.FullName $sub
         if (-not (Test-Path $sourcePath)) { continue }
 
-        Get-ChildItem -Path $sourcePath -Recurse -File -ErrorAction SilentlyContinue |
-            Where-Object {
-                $ext = $_.Extension.ToLowerInvariant()
-                $allowedExtensions -contains $ext
-            } |
-            ForEach-Object {
-                if (Test-TimeLimit) { break }
-                $matchedCount++
-                if ($totalBytes -ge $maxTotalBytes) {
-                    Write-Log ("Size limit reached; skipping remaining files. Limit: " + $maxTotalBytes)
-                    break
-                }
-                $relativePath = $_.FullName.Substring($sourcePath.Length).TrimStart("\")
-                $destFolder = Join-Path $destinationRoot (Join-Path $profile.Name $sub)
-                $destFile = Join-Path $destFolder $relativePath
+        $enumFiles = Get-FilesRecursive -Path $sourcePath -AllowedExtensions $allowedExtensions -ErrorCallback {
+            param($msg)
+            $script:enumErrorCount++
+            Write-Log ("Enumeration warning: " + $msg)
+        }
 
-                $destDir = Split-Path $destFile -Parent
-                if (-not (Test-Path $destDir)) {
-                    [System.IO.Directory]::CreateDirectory((Get-LongPath $destDir)) | Out-Null
-                }
-
-                $sourceFile = $_.FullName
-                try {
-                    $fileSize = $_.Length
-                    if (($totalBytes + $fileSize) -gt $maxTotalBytes) {
-                        Write-Log ("Skipping file due to size cap: " + $sourceFile)
-                        return
-                    }
-                    [System.IO.File]::Copy((Get-LongPath $sourceFile), (Get-LongPath $destFile), $true)
-                    $copiedCount++
-                    $totalBytes += $fileSize
-                } catch {
-                    $errorCount++
-                    Write-Log ("Copy failed: " + $sourceFile + " -> " + $destFile + " | " + $_.Exception.Message)
-                }
+        foreach ($fileInfo in $enumFiles) {
+            if (Test-TimeLimit) { break }
+            $matchedCount++
+            if ($totalBytes -ge $maxTotalBytes) {
+                Write-Log ("Size limit reached; skipping remaining files. Limit: " + $maxTotalBytes)
+                break
             }
+            
+            # Convert long path back to normal path for relative calculation
+            $sourceFileNormal = $fileInfo.FullName
+            if ($sourceFileNormal.StartsWith("\\?\")) {
+                $sourceFileNormal = $sourceFileNormal.Substring(4)
+            }
+            
+            $relativePath = $sourceFileNormal.Substring($sourcePath.Length).TrimStart("\")
+            $destFolder = Join-Path $destinationRoot (Join-Path $profile.Name $sub)
+            $originalDestFile = Join-Path $destFolder $relativePath
+            
+            # Check and flatten path if it exceeds maximum length for network shares
+            $pathInfo = Get-FlattenedDestinationPath -DestinationRoot $destFolder -RelativePath $relativePath -MaxLength $maxDestinationPathLength
+            
+            if ($pathInfo.WasFlattened) {
+                $script:flattenedCount++
+                Write-PathMapping -OriginalPath $originalDestFile -FlattenedPath $pathInfo.DestinationPath
+                Write-Log ("Path flattened (too long): " + $originalDestFile + " -> " + $pathInfo.DestinationPath)
+            }
+            
+            $destFile = $pathInfo.DestinationPath
+            $destDir = Split-Path $destFile -Parent
+            if (-not (Test-Path $destDir)) {
+                [System.IO.Directory]::CreateDirectory((Get-LongPath $destDir)) | Out-Null
+            }
+
+            $sourceFile = $fileInfo.FullName
+            try {
+                $fileSize = $fileInfo.Length
+                if (($totalBytes + $fileSize) -gt $maxTotalBytes) {
+                    Write-Log ("Skipping file due to size cap: " + $sourceFileNormal)
+                    continue
+                }
+                [System.IO.File]::Copy((Get-LongPath $sourceFile), (Get-LongPath $destFile), $true)
+                $copiedCount++
+                $totalBytes += $fileSize
+            } catch {
+                $errorCount++
+                Write-Log ("Copy failed: " + $sourceFileNormal + " -> " + $destFile + " | " + $_.Exception.Message)
+            }
+        }
     }
     if ($script:timeLimitReached) { break }
 }
@@ -226,39 +428,60 @@ if ((-not (Test-TimeLimit)) -and (Test-Path $rootScanPath)) {
             break
         }
 
-        Get-ChildItem -Path $folder.FullName -Recurse -File -ErrorAction SilentlyContinue |
-            Where-Object { $allowedExtensions -contains $_.Extension.ToLowerInvariant() } |
-            ForEach-Object {
-                if (Test-TimeLimit) { break }
-                $matchedCount++
-                if ($totalBytes -ge $maxTotalBytes) {
-                    Write-Log ("Size limit reached; skipping remaining root files. Limit: " + $maxTotalBytes)
-                    break
-                }
-                $relativePath = $_.FullName.Substring($rootScanPath.Length).TrimStart("\")
-                $destFolder = Join-Path $destinationRoot $rootCopyFolderName
-                $destFile = Join-Path $destFolder $relativePath
+        $enumFiles = Get-FilesRecursive -Path $folder.FullName -AllowedExtensions $allowedExtensions -ErrorCallback {
+            param($msg)
+            $script:enumErrorCount++
+            Write-Log ("Enumeration warning: " + $msg)
+        }
 
-                $destDir = Split-Path $destFile -Parent
-                if (-not (Test-Path $destDir)) {
-                    [System.IO.Directory]::CreateDirectory((Get-LongPath $destDir)) | Out-Null
-                }
-
-                $sourceFile = $_.FullName
-                try {
-                    $fileSize = $_.Length
-                    if (($totalBytes + $fileSize) -gt $maxTotalBytes) {
-                        Write-Log ("Skipping file due to size cap: " + $sourceFile)
-                        return
-                    }
-                    [System.IO.File]::Copy((Get-LongPath $sourceFile), (Get-LongPath $destFile), $true)
-                    $copiedCount++
-                    $totalBytes += $fileSize
-                } catch {
-                    $errorCount++
-                    Write-Log ("Copy failed: " + $sourceFile + " -> " + $destFile + " | " + $_.Exception.Message)
-                }
+        foreach ($fileInfo in $enumFiles) {
+            if (Test-TimeLimit) { break }
+            $matchedCount++
+            if ($totalBytes -ge $maxTotalBytes) {
+                Write-Log ("Size limit reached; skipping remaining root files. Limit: " + $maxTotalBytes)
+                break
             }
+            
+            # Convert long path back to normal path for relative calculation
+            $sourceFileNormal = $fileInfo.FullName
+            if ($sourceFileNormal.StartsWith("\\?\")) {
+                $sourceFileNormal = $sourceFileNormal.Substring(4)
+            }
+            
+            $relativePath = $sourceFileNormal.Substring($rootScanPath.Length).TrimStart("\")
+            $destFolder = Join-Path $destinationRoot $rootCopyFolderName
+            $originalDestFile = Join-Path $destFolder $relativePath
+            
+            # Check and flatten path if it exceeds maximum length for network shares
+            $pathInfo = Get-FlattenedDestinationPath -DestinationRoot $destFolder -RelativePath $relativePath -MaxLength $maxDestinationPathLength
+            
+            if ($pathInfo.WasFlattened) {
+                $script:flattenedCount++
+                Write-PathMapping -OriginalPath $originalDestFile -FlattenedPath $pathInfo.DestinationPath
+                Write-Log ("Path flattened (too long): " + $originalDestFile + " -> " + $pathInfo.DestinationPath)
+            }
+            
+            $destFile = $pathInfo.DestinationPath
+            $destDir = Split-Path $destFile -Parent
+            if (-not (Test-Path $destDir)) {
+                [System.IO.Directory]::CreateDirectory((Get-LongPath $destDir)) | Out-Null
+            }
+
+            $sourceFile = $fileInfo.FullName
+            try {
+                $fileSize = $fileInfo.Length
+                if (($totalBytes + $fileSize) -gt $maxTotalBytes) {
+                    Write-Log ("Skipping file due to size cap: " + $sourceFileNormal)
+                    continue
+                }
+                [System.IO.File]::Copy((Get-LongPath $sourceFile), (Get-LongPath $destFile), $true)
+                $copiedCount++
+                $totalBytes += $fileSize
+            } catch {
+                $errorCount++
+                Write-Log ("Copy failed: " + $sourceFileNormal + " -> " + $destFile + " | " + $_.Exception.Message)
+            }
+        }
     }
 }
 Write-Log "Root drive scan finished."
@@ -266,6 +489,8 @@ Write-Log "Root drive scan finished."
 Write-Log ("Planned files: " + $matchedCount)
 Write-Log ("Copied files: " + $copiedCount)
 Write-Log ("Copy errors: " + $errorCount)
+Write-Log ("Enumeration errors: " + $enumErrorCount)
+Write-Log ("Flattened paths (too long): " + $script:flattenedCount)
 Write-Log ("Total bytes copied: " + $totalBytes)
 Write-Log ("Timed out: " + $script:timeLimitReached)
 Write-Log "Copy job finished."
@@ -275,4 +500,8 @@ Write-Log "Copy job finished."
 Write-Host "Copy complete."
 Write-Host ("Destination root: " + $destinationRoot)
 Write-Host ("Log file: " + $logFile)
+if ($script:flattenedCount -gt 0) {
+    Write-Host ("Path mapping file (for flattened paths): " + $pathMappingFile)
+    Write-Host ("Total paths flattened: " + $script:flattenedCount)
+}
 exit 0
