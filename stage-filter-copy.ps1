@@ -77,7 +77,9 @@ function Get-FilesRecursive {
     return $files
 }
 
-# Flatten destination path if it exceeds maximum length for network shares
+# Flatten destination path if it exceeds maximum length for network shares.
+# Uniqueness: hash the full logical destination path (DestinationRoot + RelativePath) so every file
+# gets a unique hash; use full SHA256 (32 hex chars) for the suffix to avoid collisions.
 function Get-FlattenedDestinationPath {
     param(
         [Parameter(Mandatory = $true)][string]$DestinationRoot,
@@ -96,105 +98,75 @@ function Get-FlattenedDestinationPath {
         }
     }
     
-    # Path is too long - flatten it
-    # Strategy: Keep base folder structure (user/profile/subfolder) but flatten deep nesting
-    # Use hash of the deep path to create a shorter unique identifier
+    # Hash the FULL logical path so every file is unique (same relative path under different users = different hash)
+    $uniqueKey = $fullPath
+    $pathHashSuffix = ""
+    $folderHash = ""
+    try {
+        $sha = [System.Security.Cryptography.SHA256]::Create()
+        try {
+            $hb = $sha.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($uniqueKey))
+            $fullHashHex = [BitConverter]::ToString($hb).Replace("-", "")
+            # Full 32-char SHA256 for suffix (no practical collisions); first 16 for _flat_ folder
+            $pathHashSuffix = $fullHashHex
+            $folderHash = $fullHashHex.Substring(0, 16)
+        } finally {
+            $sha.Dispose()
+        }
+    } catch {
+        # Fallback: combine two 32-bit hashes for 64-bit suffix; avoid single GetHashCode() collision rate
+        $h1 = [Math]::Abs($uniqueKey.GetHashCode())
+        $h2 = [Math]::Abs(($uniqueKey.Length * 31 + $uniqueKey.GetHashCode()).GetHashCode())
+        $pathHashSuffix = ($h1.ToString("X8") + $h2.ToString("X8"))
+        $folderHash = $pathHashSuffix.Substring(0, 16)
+    }
     
     $parts = $RelativePath.Split([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar)
     $fileName = $parts[-1]
     $extension = [IO.Path]::GetExtension($fileName)
     $nameWithoutExt = [IO.Path]::GetFileNameWithoutExtension($fileName)
     
-    # Keep first 2-3 directory levels, then hash the rest
+    # Short suffix for filenames: 32 chars can exceed path limit; use 24 hex (96 bits) in names
+    $shortSuffix = $pathHashSuffix.Substring(0, [Math]::Min(24, $pathHashSuffix.Length))
+    
     $keepLevels = 2
     if ($parts.Count -le $keepLevels + 1) {
-        # Not enough levels to flatten meaningfully, just truncate the filename if needed
-        $maxFileNameLength = $MaxLength - $DestinationRoot.Length - 20
-        if ($maxFileNameLength -lt 20) {
-            $maxFileNameLength = 20
-        }
+        $maxFileNameLength = $MaxLength - $DestinationRoot.Length - 50
+        if ($maxFileNameLength -lt 30) { $maxFileNameLength = 30 }
         if ($fileName.Length -gt $maxFileNameLength) {
-            $truncatedName = $nameWithoutExt.Substring(0, [Math]::Min($nameWithoutExt.Length, $maxFileNameLength - $extension.Length - 10)) + "_" + $nameWithoutExt.GetHashCode().ToString("X8") + $extension
+            $truncatedName = $nameWithoutExt.Substring(0, [Math]::Min($nameWithoutExt.Length, $maxFileNameLength - $extension.Length - $shortSuffix.Length - 2)) + "_" + $shortSuffix + $extension
             $flattenedPath = Join-Path $DestinationRoot $truncatedName
-            return @{
-                DestinationPath = $flattenedPath
-                WasFlattened = $true
-                OriginalPath = $fullPath
-            }
         } else {
-            # Path is too long but filename is short - likely the destination root is very long
-            # Just put file directly in destination root
-            $flattenedPath = Join-Path $DestinationRoot $fileName
-            return @{
-                DestinationPath = $flattenedPath
-                WasFlattened = $true
-                OriginalPath = $fullPath
-            }
+            $flattenedPath = Join-Path $DestinationRoot ($nameWithoutExt + "_" + $shortSuffix + $extension)
         }
+        return @{ DestinationPath = $flattenedPath; WasFlattened = $true; OriginalPath = $fullPath }
     }
     
-    # Build path with first few levels, then hash the rest
     $basePath = $DestinationRoot
-    $pathToHash = ""
-    
-    # Keep first keepLevels directories
     for ($i = 0; $i -lt [Math]::Min($keepLevels, $parts.Count - 1); $i++) {
         $basePath = Join-Path $basePath $parts[$i]
     }
+    $hashFolder = Join-Path $basePath ("_flat_" + $folderHash)
+    $flattenedPath = Join-Path $hashFolder $fileName
     
-    # Hash the remaining path (excluding filename)
-    if ($parts.Count -gt $keepLevels + 1) {
-        $remainingParts = $parts[$keepLevels..($parts.Count - 2)]
-        $pathToHash = $remainingParts -join "\"
-    }
-    
-    # Create a short hash-based folder name
-    $hashString = ""
-    try {
-        $md5 = [System.Security.Cryptography.MD5]::Create()
-        try {
-            $hash = $md5.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($pathToHash))
-            $hashString = [BitConverter]::ToString($hash).Replace("-", "").Substring(0, 8)
-        } finally {
-            $md5.Dispose()
-        }
-    } catch {
-        # Fallback to simple hash code if MD5 fails
-        $hashString = $pathToHash.GetHashCode().ToString("X8").Substring(0, 8)
-    }
-    
-    if ($pathToHash) {
-        $hashFolder = Join-Path $basePath ("_flat_" + $hashString)
-        $flattenedPath = Join-Path $hashFolder $fileName
-    } else {
-        $flattenedPath = Join-Path $basePath $fileName
-    }
-    
-    # If still too long, truncate filename
     if ($flattenedPath.Length -gt $MaxLength) {
-        $maxFileNameLength = $MaxLength - (Split-Path $flattenedPath -Parent).Length - 5
-        if ($maxFileNameLength -gt 20) {
-            $truncatedName = $nameWithoutExt.Substring(0, [Math]::Min($nameWithoutExt.Length, $maxFileNameLength - $extension.Length - 10)) + "_" + $nameWithoutExt.GetHashCode().ToString("X8") + $extension
-            $flattenedPath = Join-Path (Split-Path $flattenedPath -Parent) $truncatedName
+        $parentPath = Split-Path $flattenedPath -Parent
+        $maxFileNameLength = $MaxLength - $parentPath.Length - 5
+        if ($maxFileNameLength -gt 30) {
+            $truncatedName = $nameWithoutExt.Substring(0, [Math]::Min($nameWithoutExt.Length, $maxFileNameLength - $extension.Length - $shortSuffix.Length - 2)) + "_" + $shortSuffix + $extension
+            $flattenedPath = Join-Path $parentPath $truncatedName
         } else {
-            # Last resort: just use hash as filename
-            $hashFileName = $hashString + $extension
-            $flattenedPath = Join-Path (Split-Path $flattenedPath -Parent) $hashFileName
+            $flattenedPath = Join-Path $parentPath ($shortSuffix + $extension)
         }
     }
     
-    return @{
-        DestinationPath = $flattenedPath
-        WasFlattened = $true
-        OriginalPath = $fullPath
-    }
+    return @{ DestinationPath = $flattenedPath; WasFlattened = $true; OriginalPath = $fullPath }
 }
 
 $stagingRoot = "C:\Staging_Logmein_central"
 # Folder for image files that don't fit within the size limit (separate from staging)
 $overflowRoot = "C:\Staging_Logmein_overflow"
-$archiveFolderName = "01_PCARCHIVE"
-$maxTotalBytes = 30GB
+$maxTotalBytes = 60GB
 $maxRunMinutes = 30
 # Maximum destination path length (network shares often have stricter limits than local paths)
 # Set to 200 to leave room for network share UNC paths (e.g., \\server\share\...)
@@ -228,17 +200,16 @@ try {
     exit 1
 }
 
-$propertyPcDetailsName = $config.PropertyFolder
+$propertyPcDetailsName = if ($config.PropertyFolder) { $config.PropertyFolder.Trim() } else { $null }
 $targetFolder = $config.TargetFolder
-if (-not $propertyPcDetailsName -or -not $targetFolder) {
-    Write-Host "PcDetails.json must contain PropertyFolder and TargetFolder."
+if (-not $targetFolder) {
+    Write-Host "PcDetails.json must contain TargetFolder."
     exit 1
 }
 
-$propertyPcDetailsName = $propertyPcDetailsName.Trim()
 $targetFolder = $targetFolder.Trim()
-if (-not $propertyPcDetailsName -or -not $targetFolder) {
-    Write-Host "PropertyPcDetails or TargetFolder is empty in: $pcDetailsMapping"
+if (-not $targetFolder) {
+    Write-Host "TargetFolder is empty in: $pcDetailsMapping"
     exit 1
 }
 
@@ -249,7 +220,7 @@ if (-not $targetFolder) {
     exit 1
 }
 
-$destinationBase = Join-Path $stagingRoot (Join-Path $propertyPcDetailsName (Join-Path $archiveFolderName $targetFolder))
+$destinationBase = Join-Path $stagingRoot $targetFolder
 if (-not $destinationBase) {
     Write-Host "Destination base is empty."
     exit 1
@@ -353,7 +324,7 @@ function Test-TimeLimit {
 Write-Log "Copy job started."
 Write-Log ("ContentType: " + $ContentType)
 Write-Log ("ComputerName: " + $computerName)
-Write-Log ("PropertyPcDetails: " + $propertyPcDetailsName)
+if ($propertyPcDetailsName) { Write-Log ("PropertyPcDetails: " + $propertyPcDetailsName) }
 Write-Log ("DestinationRoot: " + $destinationRoot)
 if ($ContentType -eq "All") {
     Write-Log ("Images over " + $maxTotalBytes + " will be logged and reported (not copied).")

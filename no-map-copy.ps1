@@ -1,4 +1,4 @@
-# RUN COMMAND in LogMeIn Central (PowerShell 2.0 compatible).
+# RUN COMMAND in LogMeIn Central (PowerShell 2.0 compatible) and compatible with Windows 7.
 # Strategy: Records first, then Images. 30GB limit. Images over limit are logged and reported (not copied).
 # No PcDetails.json; destination is C:\Staging_Logmein_central\<COMPUTERNAME>.
 
@@ -12,9 +12,88 @@ if ($PSVersionTable.PSVersion.Major -ge 2) {
 }
 $ErrorActionPreference = "Stop"
 
+# Long path support: use \\?\ prefix so paths > 260 chars work when copying/creating dirs
+function Get-LongPath {
+    param([string]$Path)
+    if ([string]::IsNullOrWhiteSpace($Path)) { return $Path }
+    $p = $Path.TrimEnd('\')
+    if ($p.StartsWith("\\?\")) { return $p }
+    if ($p.Length -ge 2 -and $p[1] -eq ':') { return "\\?\$p" }
+    $resolved = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($p)
+    if ($resolved.Length -ge 2 -and $resolved[1] -eq ':') { return "\\?\$resolved" }
+    return $p
+}
+
+# Flatten destination path if it exceeds maximum length. Hash the full logical path so every file is unique.
+function Get-FlattenedDestinationPath {
+    param(
+        [string]$DestinationRoot,
+        [string]$RelativePath,
+        [int]$MaxLength
+    )
+    $fullPath = Join-Path $DestinationRoot $RelativePath
+    $pathLength = $fullPath.Length
+    if ($pathLength -le $MaxLength) {
+        return @{ DestinationPath = $fullPath; WasFlattened = $false; OriginalPath = $fullPath }
+    }
+    $uniqueKey = $fullPath
+    $pathHashSuffix = ""
+    $folderHash = ""
+    try {
+        $sha = [System.Security.Cryptography.SHA256]::Create()
+        try {
+            $hb = $sha.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($uniqueKey))
+            $fullHashHex = [BitConverter]::ToString($hb).Replace("-", "")
+            $pathHashSuffix = $fullHashHex
+            $folderHash = $fullHashHex.Substring(0, 16)
+        } finally { $sha.Dispose() }
+    } catch {
+        $h1 = [Math]::Abs($uniqueKey.GetHashCode())
+        $h2 = [Math]::Abs(($uniqueKey.Length * 31 + $uniqueKey.GetHashCode()).GetHashCode())
+        $pathHashSuffix = ($h1.ToString("X8") + $h2.ToString("X8"))
+        $folderHash = $pathHashSuffix.Substring(0, 16)
+    }
+    $parts = $RelativePath.Split([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar)
+    $fileName = $parts[-1]
+    $extension = [IO.Path]::GetExtension($fileName)
+    $nameWithoutExt = [IO.Path]::GetFileNameWithoutExtension($fileName)
+    $shortSuffix = $pathHashSuffix.Substring(0, [Math]::Min(24, $pathHashSuffix.Length))
+    $keepLevels = 2
+    if ($parts.Count -le $keepLevels + 1) {
+        $maxFileNameLength = $MaxLength - $DestinationRoot.Length - 50
+        if ($maxFileNameLength -lt 30) { $maxFileNameLength = 30 }
+        if ($fileName.Length -gt $maxFileNameLength) {
+            $truncatedName = $nameWithoutExt.Substring(0, [Math]::Min($nameWithoutExt.Length, $maxFileNameLength - $extension.Length - $shortSuffix.Length - 2)) + "_" + $shortSuffix + $extension
+            $flattenedPath = Join-Path $DestinationRoot $truncatedName
+        } else {
+            $flattenedPath = Join-Path $DestinationRoot ($nameWithoutExt + "_" + $shortSuffix + $extension)
+        }
+        return @{ DestinationPath = $flattenedPath; WasFlattened = $true; OriginalPath = $fullPath }
+    }
+    $basePath = $DestinationRoot
+    for ($i = 0; $i -lt [Math]::Min($keepLevels, $parts.Count - 1); $i++) {
+        $basePath = Join-Path $basePath $parts[$i]
+    }
+    $hashFolder = Join-Path $basePath ("_flat_" + $folderHash)
+    $flattenedPath = Join-Path $hashFolder $fileName
+    if ($flattenedPath.Length -gt $MaxLength) {
+        $parentPath = Split-Path $flattenedPath -Parent
+        $maxFileNameLength = $MaxLength - $parentPath.Length - 5
+        if ($maxFileNameLength -gt 30) {
+            $truncatedName = $nameWithoutExt.Substring(0, [Math]::Min($nameWithoutExt.Length, $maxFileNameLength - $extension.Length - $shortSuffix.Length - 2)) + "_" + $shortSuffix + $extension
+            $flattenedPath = Join-Path $parentPath $truncatedName
+        } else {
+            $flattenedPath = Join-Path $parentPath ($shortSuffix + $extension)
+        }
+    }
+    return @{ DestinationPath = $flattenedPath; WasFlattened = $true; OriginalPath = $fullPath }
+}
+
 $stagingRoot = "C:\Staging_Logmein_central"
 $maxTotalBytes = 30GB
 $maxRunMinutes = 30
+# Maximum destination path length (e.g. network share limits)
+$maxDestinationPathLength = 200
 
 if (-not $stagingRoot) {
     Write-Host "Staging root path is empty."
@@ -161,11 +240,10 @@ if ($ContentType -eq "All") {
                     if ($totalBytes -ge $maxTotalBytes) { return }
                     $relativePath = $_.FullName.Substring($sourcePath.Length).TrimStart("\")
                     $destFolder = Join-Path $phase1DestRoot (Join-Path $profile.Name $sub)
-                    $destFile = Join-Path $destFolder $relativePath
+                    $pathInfo = Get-FlattenedDestinationPath -DestinationRoot $destFolder -RelativePath $relativePath -MaxLength $maxDestinationPathLength
+                    $destFile = $pathInfo.DestinationPath
                     $destDir = Split-Path $destFile -Parent
-                    if (-not (Test-Path $destDir)) {
-                        New-Item -Path $destDir -ItemType Directory -Force | Out-Null
-                    }
+                    [System.IO.Directory]::CreateDirectory((Get-LongPath $destDir)) | Out-Null
                     $sourceFile = $_.FullName
                     try {
                         $fileSize = $_.Length
@@ -173,7 +251,7 @@ if ($ContentType -eq "All") {
                             Write-Log ("Skipping file due to size cap: " + $sourceFile)
                             return
                         }
-                        Copy-Item -Path $sourceFile -Destination $destFile -Force -ErrorAction Stop
+                        [System.IO.File]::Copy((Get-LongPath $sourceFile), (Get-LongPath $destFile), $true)
                         $copiedCount++
                         $totalBytes += $fileSize
                     } catch {
@@ -207,11 +285,10 @@ if ($ContentType -eq "All") {
                     if ($totalBytes -ge $maxTotalBytes) { return }
                     $relativePath = $_.FullName.Substring($rootScanPath.Length).TrimStart("\")
                     $destFolder = Join-Path $phase1DestRoot $rootCopyFolderName
-                    $destFile = Join-Path $destFolder $relativePath
+                    $pathInfo = Get-FlattenedDestinationPath -DestinationRoot $destFolder -RelativePath $relativePath -MaxLength $maxDestinationPathLength
+                    $destFile = $pathInfo.DestinationPath
                     $destDir = Split-Path $destFile -Parent
-                    if (-not (Test-Path $destDir)) {
-                        New-Item -Path $destDir -ItemType Directory -Force | Out-Null
-                    }
+                    [System.IO.Directory]::CreateDirectory((Get-LongPath $destDir)) | Out-Null
                     $sourceFile = $_.FullName
                     try {
                         $fileSize = $_.Length
@@ -219,7 +296,7 @@ if ($ContentType -eq "All") {
                             Write-Log ("Skipping file due to size cap: " + $sourceFile)
                             return
                         }
-                        Copy-Item -Path $sourceFile -Destination $destFile -Force -ErrorAction Stop
+                        [System.IO.File]::Copy((Get-LongPath $sourceFile), (Get-LongPath $destFile), $true)
                         $copiedCount++
                         $totalBytes += $fileSize
                     } catch {
@@ -269,13 +346,12 @@ if ($ContentType -eq "All") {
 
                     $relativePath = $_.FullName.Substring($sourcePath.Length).TrimStart("\")
                     $destFolder = Join-Path $imagesStagingRoot (Join-Path $profile.Name $sub)
-                    $destFile = Join-Path $destFolder $relativePath
+                    $pathInfo = Get-FlattenedDestinationPath -DestinationRoot $destFolder -RelativePath $relativePath -MaxLength $maxDestinationPathLength
+                    $destFile = $pathInfo.DestinationPath
                     $destDir = Split-Path $destFile -Parent
-                    if (-not (Test-Path $destDir)) {
-                        New-Item -Path $destDir -ItemType Directory -Force | Out-Null
-                    }
+                    [System.IO.Directory]::CreateDirectory((Get-LongPath $destDir)) | Out-Null
                     try {
-                        Copy-Item -Path $sourceFile -Destination $destFile -Force -ErrorAction Stop
+                        [System.IO.File]::Copy((Get-LongPath $sourceFile), (Get-LongPath $destFile), $true)
                         $copiedCount++
                         $totalBytes += $fileSize
                     } catch {
@@ -322,13 +398,12 @@ if ($ContentType -eq "All") {
 
                     $relativePath = $_.FullName.Substring($rootScanPath.Length).TrimStart("\")
                     $destFolder = Join-Path $imagesStagingRoot $rootCopyFolderName
-                    $destFile = Join-Path $destFolder $relativePath
+                    $pathInfo = Get-FlattenedDestinationPath -DestinationRoot $destFolder -RelativePath $relativePath -MaxLength $maxDestinationPathLength
+                    $destFile = $pathInfo.DestinationPath
                     $destDir = Split-Path $destFile -Parent
-                    if (-not (Test-Path $destDir)) {
-                        New-Item -Path $destDir -ItemType Directory -Force | Out-Null
-                    }
+                    [System.IO.Directory]::CreateDirectory((Get-LongPath $destDir)) | Out-Null
                     try {
-                        Copy-Item -Path $sourceFile -Destination $destFile -Force -ErrorAction Stop
+                        [System.IO.File]::Copy((Get-LongPath $sourceFile), (Get-LongPath $destFile), $true)
                         $copiedCount++
                         $totalBytes += $fileSize
                     } catch {
@@ -386,11 +461,10 @@ if ($ContentType -eq "All") {
                     }
                     $relativePath = $_.FullName.Substring($sourcePath.Length).TrimStart("\")
                     $destFolder = Join-Path $destinationRoot (Join-Path $profile.Name $sub)
-                    $destFile = Join-Path $destFolder $relativePath
+                    $pathInfo = Get-FlattenedDestinationPath -DestinationRoot $destFolder -RelativePath $relativePath -MaxLength $maxDestinationPathLength
+                    $destFile = $pathInfo.DestinationPath
                     $destDir = Split-Path $destFile -Parent
-                    if (-not (Test-Path $destDir)) {
-                        New-Item -Path $destDir -ItemType Directory -Force | Out-Null
-                    }
+                    [System.IO.Directory]::CreateDirectory((Get-LongPath $destDir)) | Out-Null
                     $sourceFile = $_.FullName
                     try {
                         $fileSize = $_.Length
@@ -398,7 +472,7 @@ if ($ContentType -eq "All") {
                             Write-Log ("Skipping file due to size cap: " + $sourceFile)
                             return
                         }
-                        Copy-Item -Path $sourceFile -Destination $destFile -Force -ErrorAction Stop
+                        [System.IO.File]::Copy((Get-LongPath $sourceFile), (Get-LongPath $destFile), $true)
                         $copiedCount++
                         $totalBytes += $fileSize
                     } catch {
@@ -434,11 +508,10 @@ if ($ContentType -eq "All") {
                     if ($totalBytes -ge $maxTotalBytes) { return }
                     $relativePath = $_.FullName.Substring($rootScanPath.Length).TrimStart("\")
                     $destFolder = Join-Path $destinationRoot $rootCopyFolderName
-                    $destFile = Join-Path $destFolder $relativePath
+                    $pathInfo = Get-FlattenedDestinationPath -DestinationRoot $destFolder -RelativePath $relativePath -MaxLength $maxDestinationPathLength
+                    $destFile = $pathInfo.DestinationPath
                     $destDir = Split-Path $destFile -Parent
-                    if (-not (Test-Path $destDir)) {
-                        New-Item -Path $destDir -ItemType Directory -Force | Out-Null
-                    }
+                    [System.IO.Directory]::CreateDirectory((Get-LongPath $destDir)) | Out-Null
                     $sourceFile = $_.FullName
                     try {
                         $fileSize = $_.Length
@@ -446,7 +519,7 @@ if ($ContentType -eq "All") {
                             Write-Log ("Skipping file due to size cap: " + $sourceFile)
                             return
                         }
-                        Copy-Item -Path $sourceFile -Destination $destFile -Force -ErrorAction Stop
+                        [System.IO.File]::Copy((Get-LongPath $sourceFile), (Get-LongPath $destFile), $true)
                         $copiedCount++
                         $totalBytes += $fileSize
                     } catch {
