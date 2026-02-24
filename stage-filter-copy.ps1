@@ -180,7 +180,7 @@ if (-not $stagingRoot) {
 }
 
 if (-not (Test-Path $stagingRoot)) {
-    [System.IO.Directory]::CreateDirectory((Get-LongPath $stagingRoot)) | Out-Null
+    [System.IO.Directory]::CreateDirectory($stagingRoot) | Out-Null
 }
 
 $computerName = $env:COMPUTERNAME
@@ -278,7 +278,7 @@ $excludedRootPrefixes = @(
 
 $logDestinationRoot = $destinationBase
 if (-not (Test-Path $logDestinationRoot)) {
-    [System.IO.Directory]::CreateDirectory((Get-LongPath $logDestinationRoot)) | Out-Null
+    [System.IO.Directory]::CreateDirectory($logDestinationRoot) | Out-Null
 }
 
 $timestamp = Get-Date -Format "yyyyMMdd-HHmmss"
