@@ -1,13 +1,12 @@
-# Gates Hudson LogMeIn Remote Backup
-## Workflow
+# Gates Hudson Internship (2026) 
+### LogMeIn Central - Remote Backup Project
+### Workflow
 1. Load PcDetails.json into C:\ of remote PC.
-2. Upload ```logmein-remote-backup.ps1``` script in remote manager of LogMeIn Central for a batch of PCs to create staging folder for before copying to (Prop) network share drive.
-3. From the LogMeIn file manager of the remote PC, copy over the Staging_Logmein_central folder to (Prop).
-4. After the upload is completed, run the copy-count-checker.ps1 script in a specific PC copied over to (Prop) with tolerance of ~100 or less as a quick test in determining whether or not a machine was turned off during the copy stage.
-
-## Usage of copy-count-checker.ps1
-Run inside the PC directory that needs to be checked.
-
-```powershell
-.\copy-count-checker.ps1 -ToleranceCount 100
-```
+2. Upload ```stage-filter-copy.ps1``` script in remote manager of LogMeIn Central for a batch of PCs to create staging folder for before copying to (Prop) network share drive.
+> Some systems on older versions of Powershell and systems without a File Manager in LogMeIn Central will need the ```no-map-copy.ps1``` script.
+3. From the LogMeIn Central File Manager of the remote PC, copy the Staging_logmein_central folder to 01-PCARCHIVE for each Prop folder.
+---
+### Additional Scripts
+- ```stage-filter-report.ps1``` - This script will create a report of the remote PC's volume and file count based on filter settings created in ```stage-filter-copy.ps1``` 
+- ```delete-staging-folder.ps1``` - Use this script in a LogMein Central job to purge and free up disk space for the staging folders created after running ```stage-filter-copy.ps1```
+- ```create-pc-details.sh``` - Used locally after recreating the Prop drive folder structure of all prop folders and their PCs. Generates mappings to load into C:\ of each PC before running a ```stage-filter-copy.ps1``` job
