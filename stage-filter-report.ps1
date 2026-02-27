@@ -90,6 +90,7 @@ $sourceSubfolders = @("Desktop", "Documents", "Pictures")
 $usersRoot = "C:\Users"
 $excludedUsers = @("Default", "Default User", "All Users", "DefaultAppPool", "WDAGUtilityAccount", "LogMeInRemoteUser")
 $rootScanPath = "C:\"
+$stagingRoot = "C:\Staging_Logmein_central"
 $excludedRootPrefixes = @(
     "C:\Apps",
     "C:\Dell",
@@ -191,6 +192,7 @@ if (-not [string]::IsNullOrWhiteSpace($rootScanPath) -and (Test-Path $rootScanPa
     $rootFolders = Get-ChildItem -Path $rootScanPath -Directory -ErrorAction SilentlyContinue |
         Where-Object {
             $fullName = $_.FullName
+            (-not $fullName.StartsWith($stagingRoot, [System.StringComparison]::OrdinalIgnoreCase)) -and
             (-not $fullName.StartsWith($usersRoot, [System.StringComparison]::OrdinalIgnoreCase)) -and
             (-not ($excludedRootPrefixes | Where-Object {
                 $fullName.StartsWith($_, [System.StringComparison]::OrdinalIgnoreCase)

@@ -1,5 +1,6 @@
 # New Checking Workflow
 ## Count files for given PC subfolder, use command: 
+
 ```powershell
 (Get-ChildItem -Path . -File -Recurse).Count 
 ```
