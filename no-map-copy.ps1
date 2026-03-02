@@ -243,15 +243,15 @@ if ($ContentType -eq "All") {
                     $pathInfo = Get-FlattenedDestinationPath -DestinationRoot $destFolder -RelativePath $relativePath -MaxLength $maxDestinationPathLength
                     $destFile = $pathInfo.DestinationPath
                     $destDir = Split-Path $destFile -Parent
-                    [System.IO.Directory]::CreateDirectory((Get-LongPath $destDir)) | Out-Null
                     $sourceFile = $_.FullName
                     try {
+                        [System.IO.Directory]::CreateDirectory($destDir) | Out-Null
                         $fileSize = $_.Length
                         if (($totalBytes + $fileSize) -gt $maxTotalBytes) {
                             Write-Log ("Skipping file due to size cap: " + $sourceFile)
                             return
                         }
-                        [System.IO.File]::Copy((Get-LongPath $sourceFile), (Get-LongPath $destFile), $true)
+                        [System.IO.File]::Copy((Get-LongPath $sourceFile), $destFile, $true)
                         $copiedCount++
                         $totalBytes += $fileSize
                     } catch {
@@ -288,15 +288,15 @@ if ($ContentType -eq "All") {
                     $pathInfo = Get-FlattenedDestinationPath -DestinationRoot $destFolder -RelativePath $relativePath -MaxLength $maxDestinationPathLength
                     $destFile = $pathInfo.DestinationPath
                     $destDir = Split-Path $destFile -Parent
-                    [System.IO.Directory]::CreateDirectory((Get-LongPath $destDir)) | Out-Null
                     $sourceFile = $_.FullName
                     try {
+                        [System.IO.Directory]::CreateDirectory($destDir) | Out-Null
                         $fileSize = $_.Length
                         if (($totalBytes + $fileSize) -gt $maxTotalBytes) {
                             Write-Log ("Skipping file due to size cap: " + $sourceFile)
                             return
                         }
-                        [System.IO.File]::Copy((Get-LongPath $sourceFile), (Get-LongPath $destFile), $true)
+                        [System.IO.File]::Copy((Get-LongPath $sourceFile), $destFile, $true)
                         $copiedCount++
                         $totalBytes += $fileSize
                     } catch {
@@ -349,9 +349,9 @@ if ($ContentType -eq "All") {
                     $pathInfo = Get-FlattenedDestinationPath -DestinationRoot $destFolder -RelativePath $relativePath -MaxLength $maxDestinationPathLength
                     $destFile = $pathInfo.DestinationPath
                     $destDir = Split-Path $destFile -Parent
-                    [System.IO.Directory]::CreateDirectory((Get-LongPath $destDir)) | Out-Null
                     try {
-                        [System.IO.File]::Copy((Get-LongPath $sourceFile), (Get-LongPath $destFile), $true)
+                        [System.IO.Directory]::CreateDirectory($destDir) | Out-Null
+                        [System.IO.File]::Copy((Get-LongPath $sourceFile), $destFile, $true)
                         $copiedCount++
                         $totalBytes += $fileSize
                     } catch {
@@ -401,9 +401,9 @@ if ($ContentType -eq "All") {
                     $pathInfo = Get-FlattenedDestinationPath -DestinationRoot $destFolder -RelativePath $relativePath -MaxLength $maxDestinationPathLength
                     $destFile = $pathInfo.DestinationPath
                     $destDir = Split-Path $destFile -Parent
-                    [System.IO.Directory]::CreateDirectory((Get-LongPath $destDir)) | Out-Null
                     try {
-                        [System.IO.File]::Copy((Get-LongPath $sourceFile), (Get-LongPath $destFile), $true)
+                        [System.IO.Directory]::CreateDirectory($destDir) | Out-Null
+                        [System.IO.File]::Copy((Get-LongPath $sourceFile), $destFile, $true)
                         $copiedCount++
                         $totalBytes += $fileSize
                     } catch {
@@ -464,15 +464,15 @@ if ($ContentType -eq "All") {
                     $pathInfo = Get-FlattenedDestinationPath -DestinationRoot $destFolder -RelativePath $relativePath -MaxLength $maxDestinationPathLength
                     $destFile = $pathInfo.DestinationPath
                     $destDir = Split-Path $destFile -Parent
-                    [System.IO.Directory]::CreateDirectory((Get-LongPath $destDir)) | Out-Null
                     $sourceFile = $_.FullName
                     try {
+                        [System.IO.Directory]::CreateDirectory($destDir) | Out-Null
                         $fileSize = $_.Length
                         if (($totalBytes + $fileSize) -gt $maxTotalBytes) {
                             Write-Log ("Skipping file due to size cap: " + $sourceFile)
                             return
                         }
-                        [System.IO.File]::Copy((Get-LongPath $sourceFile), (Get-LongPath $destFile), $true)
+                        [System.IO.File]::Copy((Get-LongPath $sourceFile), $destFile, $true)
                         $copiedCount++
                         $totalBytes += $fileSize
                     } catch {
@@ -511,15 +511,15 @@ if ($ContentType -eq "All") {
                     $pathInfo = Get-FlattenedDestinationPath -DestinationRoot $destFolder -RelativePath $relativePath -MaxLength $maxDestinationPathLength
                     $destFile = $pathInfo.DestinationPath
                     $destDir = Split-Path $destFile -Parent
-                    [System.IO.Directory]::CreateDirectory((Get-LongPath $destDir)) | Out-Null
                     $sourceFile = $_.FullName
                     try {
+                        [System.IO.Directory]::CreateDirectory($destDir) | Out-Null
                         $fileSize = $_.Length
                         if (($totalBytes + $fileSize) -gt $maxTotalBytes) {
                             Write-Log ("Skipping file due to size cap: " + $sourceFile)
                             return
                         }
-                        [System.IO.File]::Copy((Get-LongPath $sourceFile), (Get-LongPath $destFile), $true)
+                        [System.IO.File]::Copy((Get-LongPath $sourceFile), $destFile, $true)
                         $copiedCount++
                         $totalBytes += $fileSize
                     } catch {
